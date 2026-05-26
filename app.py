@@ -41,6 +41,23 @@ st.set_page_config(
     layout="wide"
 )
 create_tables()
+
+st.markdown("""
+<style>
+
+.stTextInput input {
+    background-color: white !important;
+    color: black !important;
+    border-radius: 10px;
+}
+
+.stTextInput label {
+    color: white !important;
+}
+
+</style>
+""", unsafe_allow_html=True)
+ 
 st.markdown("""
 <style>
 .main {
@@ -105,9 +122,20 @@ section[data-testid="stSidebar"] {
     background-color: #111827 !important;
 }
 
-[data-testid="stSidebar"] * {
+[data-testid="stSidebar"] label {
     color: white !important;
 }
+
+[data-testid="stSidebar"] p {
+    color: white !important;
+}
+
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3 {
+    color: white !important;
+}
+
 div[data-testid="stButton"] > button {
     background-color: #2563EB !important;
     color: white !important;
