@@ -27,11 +27,38 @@ def show_courses_page():
         due_date = course[2]
 
         deadline_text = due_date if due_date else "Без дедлайна"
+        is_overdue = False
+        overdue_html = ""
+        if due_date:
 
-        st.markdown(
-            f'<div class="course-card"><h3>{course_title}</h3><p>AI-сгенерированный курс</p><p>Нажмите кнопку ниже, чтобы открыть курс.</p></div>',
-            unsafe_allow_html=True 
-        )
+            deadline_date = datetime.strptime(
+                due_date,
+                "%Y-%m-%d"
+            ).date()
+
+            if deadline_date < datetime.now().date():
+                is_overdue = True
+            overdue_html = ""
+
+            if is_overdue:
+
+                overdue_html = (
+                    "<p style='color:red;'>"
+                    "⚠️ Дедлайн просрочен"
+                    "</p>"
+                )
+            st.markdown(
+                    f'''
+                    <div class="course-card">
+                        <h3>{course_title}</h3>
+                        <p>Дедлайн: {deadline_text}</p>
+                        {overdue_html}
+                        <p>AI-сгенерированный курс</p>
+                        <p>Нажмите кнопку ниже, чтобы открыть курс.</p>
+                    </div>
+                    ''',
+                    unsafe_allow_html=True
+                )
         if st.button(
             f"Открыть курс: {course_title}",
             key=f"open_course_{course_id}"
