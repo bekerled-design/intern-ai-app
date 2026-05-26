@@ -2,7 +2,6 @@ import pandas as pd
 from docx import Document
 from pypdf import PdfReader
 
-
 def read_uploaded_file(uploaded_file):
     file_name = uploaded_file.name.lower()
 
@@ -17,7 +16,10 @@ def read_uploaded_file(uploaded_file):
 
     if file_name.endswith(".pdf"):
         return read_pdf_file(uploaded_file)
-
+    
+    if file_name.endswith((".mp4", ".mp3", ".wav", ".m4a", ".webm")):
+        return "VIDEO_FILE"
+    
     return "Неподдерживаемый формат файла"
 
 
@@ -79,10 +81,17 @@ def read_pdf_file(uploaded_file):
     return "\n".join(text)
 
 
+import os
+
+
 def save_uploaded_file(uploaded_file, file_content):
-    file_path = f"data/{uploaded_file.name}"
+
+    os.makedirs("data", exist_ok=True)
+
+    file_path = os.path.join(
+        "data",
+        uploaded_file.name
+    )
 
     with open(file_path, "w", encoding="utf-8") as file:
         file.write(file_content)
-
-    return file_path
