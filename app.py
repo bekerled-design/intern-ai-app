@@ -421,7 +421,7 @@ if page == "Главная":
                 "Пока используйте её только локально, не на Render."
             )
 
-            if st.button("Сгенерировать курс", key="generate_course_button"):
+        if st.button("Сгенерировать курс", key="generate_course_button"):
 
                 print("STEP 1: Button clicked")
 
