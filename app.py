@@ -421,46 +421,44 @@ if page == "Главная":
                 "Пока используйте её только локально, не на Render."
             )
 
-        if st.button("Сгенерировать курс", key="generate_course_button"):
-
-            with st.spinner("ИИ анализирует материал и создаёт курс..."):
-
-                if generation_mode == "Быстрый":
-                    course_data = generate_course_lite(
-                        client,
-                        material_for_course
-                    )
-                else:
-                    course_data = generate_course(
-                        client,
-                        material_for_course
-                    )
+            if st.button("Сгенерировать курс", key="generate_course_button"):
+                if "user_id" not in st.session_state:
+                    st.error("Сессия пользователя потеряна. Войдите заново.")
+                    st.stop()
                 try:
+                    with st.spinner("ИИ анализирует материал и создаёт курс..."):
 
-                    course_data = generate_course(
-                        client,
-                        material_for_course
-                    )
+                        if generation_mode == "Быстрый":
+                            course_data = generate_course_lite(
+                                client,
+                                material_for_course
+                            )
+                        else:
+                            course_data = generate_course(
+                                client,
+                                material_for_course
+                            )
 
-                    st.session_state["course_data"] = course_data
+                        st.session_state["course_data"] = course_data
 
-                    if "user_id" in st.session_state:
+                        if "user_id" in st.session_state:
+                            course_id = save_course(
+                                st.session_state["user_id"],
+                                course_data
+                            )
 
-                        course_id = save_course(
-                            st.session_state["user_id"],
-                            course_data
-                        )
+                            st.session_state["current_course_id"] = course_id
 
-                        st.session_state["current_course_id"] = course_id
+                        st.session_state["page"] = "Курс"
 
-                    st.session_state["page"] = "Курс"
-                    st.success("Курс успешно сгенерирован")
-                    st.rerun()
+                        st.success("Курс успешно сгенерирован")
+
+                        st.rerun()
 
                 except Exception as error:
-
                     st.error("Ошибка генерации курса")
                     st.code(str(error))
+
 st.divider()
 
 if page == "Курс":
