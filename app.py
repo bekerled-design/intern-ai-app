@@ -422,11 +422,16 @@ if page == "Главная":
             )
 
             if st.button("Сгенерировать курс", key="generate_course_button"):
+
+                print("STEP 1: Button clicked")
+
                 if "user_id" not in st.session_state:
                     st.error("Сессия пользователя потеряна. Войдите заново.")
                     st.stop()
                 try:
                     with st.spinner("ИИ анализирует материал и создаёт курс..."):
+                        
+                        print("STEP 2: Start generation")
 
                         if generation_mode == "Быстрый":
                             course_data = generate_course_lite(
@@ -438,24 +443,33 @@ if page == "Главная":
                                 client,
                                 material_for_course
                             )
+                        
+                        print("STEP 3: Course generated")                 
 
                         st.session_state["course_data"] = course_data
+
+                        print("STEP 4: Saving course")
 
                         if "user_id" in st.session_state:
                             course_id = save_course(
                                 st.session_state["user_id"],
                                 course_data
                             )
-
+                        
                             st.session_state["current_course_id"] = course_id
-
+                        
+                        print("STEP 5: Course saved")
+                        
                         st.session_state["page"] = "Курс"
 
                         st.success("Курс успешно сгенерирован")
 
+                        print("STEP 6: Rerun")
+
                         st.rerun()
 
                 except Exception as error:
+                    print(f"ERROR: {error}")
                     st.error("Ошибка генерации курса")
                     st.code(str(error))
 
