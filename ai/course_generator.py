@@ -19,10 +19,21 @@ def generate_course(client, file_content):
             "description": module_plan["description"],
             "content": module_content
         })
+    all_tests = []
+
+    for module in modules:
+
+        module_tests = generate_module_tests(
+            client,
+            module
+        )
+
+        all_tests.extend(module_tests)
+
     course_data = {
         "course_title": course_plan["course_title"],
         "modules": modules,
-        "test": generate_course_tests(client, modules),
+        "test": all_tests,
         "practical_task": generate_practical_task(client, modules)
     }
     return course_data
@@ -70,6 +81,30 @@ def generate_course_plan(client, file_content):
 - расположи модули в логичном порядке
 - каждая самостоятельная тема должна стать отдельным модулем
 
+КОЛИЧЕСТВО МОДУЛЕЙ:
+
+- Проанализируй весь материал.
+- Выдели ВСЕ отдельные темы.
+- Создай отдельный модуль для каждой темы.
+- Не объединяй разные темы в один модуль.
+- Если материал содержит 20 тем — создай 20 модулей.
+- Если материал содержит 30 тем — создай 30 модулей.
+- Не ограничивай количество модулей.
+- Главная цель — покрыть максимальный объём материала.
+
+ПРОВЕРКА ПОЛНОТЫ:
+
+Перед возвратом ответа проверь:
+
+1. Все ли темы из документа попали в план курса.
+2. Не пропущены ли разделы документа.
+3. Не потеряны ли примеры.
+4. Не потеряны ли инструкции.
+5. Не потеряны ли процедуры.
+6. Не потеряны ли регламенты.
+
+Если что-либо пропущено — добавь дополнительные модули.
+
 Верни JSON:
 
 {{
@@ -113,12 +148,15 @@ def get_module_context(file_content, module_plan):
     relevant_chunks = search_relevant_chunks(
         search_query,
         chunks,
-        limit=10
+        limit=15
     )
     if not relevant_chunks:
         relevant_chunks = chunks[:5]
 
         return "\n\n---\n\n".join(relevant_chunks)
+    context = "\n\n---\n\n".join(relevant_chunks)
+
+    return context[:50000]
 
 def generate_chunk_plan(client, chunk):
 
@@ -222,6 +260,55 @@ def generate_course_module(client, file_content, module_plan):
     )
 
     return response.output_text
+
+def generate_module_tests(client, module):
+
+    response = client.responses.create(
+        model="gpt-4.1-mini",
+        text={
+            "format": {
+                "type": "json_object"
+            }
+        },
+        input=f"""
+Ты — профессиональный методист корпоративного обучения.
+
+Создай тест по модулю.
+
+Название модуля:
+{module["title"]}
+
+Содержание модуля:
+{module["content"]}
+
+Требования:
+
+- Создай 5 вопросов.
+- Проверяй понимание материала.
+- Не задавай очевидные вопросы.
+- Используй только информацию из модуля.
+- Не используй внешние знания.
+- Каждый вопрос должен иметь 4 варианта ответа.
+- Только один вариант должен быть правильным.
+
+Верни JSON:
+
+{{
+    "questions": [
+        {
+            "module": "Название модуля",
+            "question": "Вопрос",
+            "options": ["1", "2", "3", "4"],
+            "correct_answer": "Правильный ответ"
+        }
+    ]
+}}
+"""
+    )
+
+    data = json.loads(response.output_text)
+
+    return data["questions"]
 
 def generate_course_tests(client, modules):
 

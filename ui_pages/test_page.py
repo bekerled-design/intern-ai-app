@@ -29,11 +29,12 @@ def show_test_page(client):
         )
 
         user_answers.append({
+            "module": question.get("module", "Без модуля"),
             "question": question["question"],
             "user_answer": answer,
             "correct_answer": question["correct_answer"]
         })
-
+        
     if st.button(
         "Проверить тест",
         key="check_generated_test_button"
@@ -54,7 +55,7 @@ def show_test_page(client):
                 wrong_answers.append(answer)
                 save_weak_topic(
                         st.session_state["user_id"],
-                        answer["question"]
+                        answer["module"]
                     )
 
         total = len(user_answers)
@@ -75,13 +76,24 @@ def show_test_page(client):
 
         if wrong_answers:
 
-            st.error("Слабые места стажёра:")
+            st.subheader("Ошибки")
 
             for wrong in wrong_answers:
-                st.write(f"Вопрос: {wrong['question']}")
-                st.write(f"Ваш ответ: {wrong['user_answer']}")
-                st.write(f"Правильный ответ: {wrong['correct_answer']}")
 
+                st.error(
+                    f"""
+        Модуль: {wrong['module']}
+
+        Вопрос:
+        {wrong['question']}
+
+        Ваш ответ:
+        {wrong['user_answer']}
+
+        Правильный ответ:
+        {wrong['correct_answer']}
+        """
+        )
             with st.spinner("ИИ анализирует слабые места стажёра..."):
 
                 ai_feedback = analyze_weaknesses(
