@@ -38,6 +38,66 @@ def generate_course(client, file_content):
     }
     return course_data
     
+def generate_course_lite(client, file_content):
+
+    if len(file_content) > 250000:
+        file_content = file_content[:250000]
+
+    response = client.responses.create(
+        model="gpt-4.1-mini",
+        text={
+            "format": {
+                "type": "json_object"
+            }
+        },
+        input=f"""
+Ты — профессиональный AI-тренер корпоративного обучения.
+
+Создай обучающий курс СТРОГО на основе предоставленного материала.
+
+ВАЖНО:
+- не придумывай темы
+- не используй внешние знания
+- не делай слишком краткий пересказ
+- сохрани ключевые темы материала
+- если материал большой, создай больше модулей
+- каждый модуль должен быть понятным и полезным для новичка
+
+Требования:
+- 5–10 модулей
+- 3–5 вопросов теста
+- практическое задание
+- ответ только в JSON
+
+Верни JSON:
+
+{{
+    "course_title": "Название курса",
+    "modules": [
+        {{
+            "title": "Название модуля",
+            "description": "Краткое описание",
+            "content": "Обучающий материал"
+        }}
+    ],
+    "test": [
+        {{
+            "question": "Вопрос",
+            "options": ["1", "2", "3", "4"],
+            "correct_answer": "Правильный ответ",
+            "module": "Название модуля"
+        }}
+    ],
+    "practical_task": "Практическое задание"
+}}
+
+Материал:
+
+{file_content}
+"""
+    )
+
+    return json.loads(response.output_text)
 
 def generate_course_plan(client, file_content):
 
@@ -292,7 +352,7 @@ def generate_module_tests(client, module):
 - Только один вариант должен быть правильным.
 
 Верни JSON:
-
+Для каждого вопроса запиши название модуля в поле "module".
 {{
     "questions": [
         {

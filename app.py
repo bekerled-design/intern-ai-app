@@ -1,3 +1,4 @@
+from ai.course_generator import generate_course, generate_course_lite
 from ai.video_transcriber import transcribe_video
 from ui_pages.admin_page import show_admin_page
 from ai.embeddings import create_embedding
@@ -404,10 +405,41 @@ if page == "Главная":
             "current_upload_material",
             ""
         )
+
+        generation_mode = st.radio(
+            "Режим генерации курса",
+            [
+                "Быстрый",
+                "Подробный"
+            ]
+        )
+        generation_mode = st.radio(
+                "Режим генерации курса",
+                [
+                    "Быстрый",
+                    "Подробный"
+                ]
+)
+        if generation_mode == "Подробный":
+            st.warning(
+                "Подробная генерация может занять много времени. "
+                "Пока используйте её только локально, не на Render."
+            )
+
         if st.button("Сгенерировать курс", key="generate_course_button"):
 
             with st.spinner("ИИ анализирует материал и создаёт курс..."):
 
+                if generation_mode == "Быстрый":
+                    course_data = generate_course_lite(
+                        client,
+                        material_for_course
+                    )
+                else:
+                    course_data = generate_course(
+                        client,
+                        material_for_course
+                    )
                 try:
 
                     course_data = generate_course(
