@@ -1,11 +1,19 @@
-def split_text_into_chunks(text, chunk_size=2000):
+def split_text_into_chunks(text, chunk_size=3000, overlap=500):
+
     chunks = []
 
-    for i in range(0, len(text), chunk_size):
-        chunk = text[i:i + chunk_size]
+    start = 0
+
+    while start < len(text):
+
+        end = start + chunk_size
+
+        chunk = text[start:end]
 
         if chunk.strip():
             chunks.append(chunk)
+
+        start += chunk_size - overlap
 
     return chunks
 

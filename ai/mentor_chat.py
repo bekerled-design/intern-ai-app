@@ -22,19 +22,22 @@ def ask_ai_mentor(client, company_material, course_data, user_question):
     question_embedding = json.loads(question_embedding_json)
 
     similar_chunks = search_similar_chunks(
+        user_question,
         question_embedding,
         chunks,
-        limit=5
+        limit=15
     )
 
     context = ""
 
-    for score, file_name, chunk_text in similar_chunks:
+    for score, semantic_score, keyword_points, file_name, chunk_text in similar_chunks:
 
         context += f"""
 
 Источник файла: {file_name}
-Релевантность: {score:.3f}
+Итоговая релевантность: {score:.3f}
+Смысловая релевантность: {semantic_score:.3f}
+Совпадения по словам: {keyword_points}
 
 {chunk_text}
 
@@ -66,12 +69,19 @@ def ask_ai_mentor(client, company_material, course_data, user_question):
     response = client.responses.create(
         model="gpt-4.1-mini",
         input=f"""
-Ты AI-наставник стажёра компании.
+Ты — AI-наставник компании.
 
-Отвечай только на основе найденных фрагментов материалов компании, учебного курса и истории общения.
+Отвечай ТОЛЬКО на основе предоставленного контекста.
 
-Если информации нет в материалах — честно скажи:
-"В материалах компании нет точной информации по этому вопросу."
+ВАЖНО:
+- Не используй свои знания.
+- Не придумывай информацию.
+- Если ответа нет в контексте — так и скажи.
+- Сначала проанализируй найденные материалы.
+- Давай максимально точный ответ.
+- Если найдено несколько источников — объедини информацию.
+- Если в контексте есть точный ответ, обязательно используй его.
+- Указывай, на каком фрагменте или документе основан ответ.
 
 История прошлых вопросов стажёра:
 {history_text}

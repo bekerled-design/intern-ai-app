@@ -362,8 +362,8 @@ if page == "Главная":
                             file_content
                         )
 
-                        if len(file_content) > 150000:
-                            file_content = file_content[:150000]
+                        if len(file_content) > 500000:
+                            file_content = file_content[:500000]
 
                         chunks = split_text_into_chunks(file_content)
                 
