@@ -19,16 +19,10 @@ def generate_course(client, file_content):
             "description": module_plan["description"],
             "content": module_content
         })
-    all_tests = []
-
-    for module in modules:
-
-        module_tests = generate_module_tests(
-            client,
-            module
-        )
-
-        all_tests.extend(module_tests)
+        all_tests = generate_course_tests(
+        client,
+        modules
+    )
 
     course_data = {
         "course_title": course_plan["course_title"],
@@ -415,16 +409,16 @@ def generate_course_tests(client, modules):
 
 Верни JSON строго по структуре:
 
-{
+{{
     "test": [
-        {
+       {{
             "question": "Вопрос",
             "options": ["Вариант 1", "Вариант 2", "Вариант 3", "Вариант 4"],
             "correct_answer": "Вариант 1",
             "topic": "Название темы или модуля"
-        }
+        }}
     ]
-}
+}}
 
 Курс:
 
@@ -536,3 +530,86 @@ def generate_practical_task(client, modules):
 
     return response.output_text
 
+def generate_part_modules(client, part_text, part_number):
+
+    response = client.responses.create(
+        model="gpt-4.1-mini",
+        text={
+            "format": {
+                "type": "json_object"
+            }
+        },
+        input=f"""
+Ты — AI-тренер корпоративного обучения.
+
+Создай обучающие модули только по этой части материала.
+
+ВАЖНО:
+- используй только эту часть материала
+- не используй внешние знания
+- не придумывай темы
+- не делай краткий пересказ
+- раскрывай темы подробно
+- не создавай больше 4 модулей по одной части
+- если тем мало — создай 1-2 модуля
+
+Верни JSON:
+
+{{
+    "modules": [
+        {{
+            "title": "Название модуля",
+            "description": "Краткое описание",
+            "content": "Подробный обучающий материал"
+        }}
+    ]
+}}
+
+Часть материала №{part_number}:
+
+{part_text}
+"""
+    )
+
+    data = json.loads(response.output_text)
+
+    return data["modules"]
+
+def generate_course_by_parts(client, file_content):
+
+    parts = split_text_into_chunks(
+        file_content,
+        chunk_size=20000,
+        overlap=1500
+    )
+    print(f"Всего частей: {len(parts)}")
+    all_modules = []
+
+    for index, part in enumerate(parts):
+        print(f"Обрабатываю часть {index + 1} из {len(parts)}")
+        part_modules = generate_part_modules(
+            client,
+            part,
+            index + 1
+        )
+
+        all_modules.extend(part_modules)
+
+    tests = generate_course_tests(
+        client,
+        all_modules
+    )
+
+    practical_task = generate_practical_task(
+        client,
+        all_modules
+    )
+
+    course_data = {
+        "course_title": "Подробный курс по материалам",
+        "modules": all_modules,
+        "test": tests,
+        "practical_task": practical_task
+    }
+
+    return course_data

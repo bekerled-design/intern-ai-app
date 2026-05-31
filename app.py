@@ -1,4 +1,4 @@
-from ai.course_generator import generate_course, generate_course_lite
+from ai.course_generator import generate_course_by_parts, generate_course_lite
 from ai.video_transcriber import transcribe_video
 from ui_pages.admin_page import show_admin_page
 from ai.embeddings import create_embedding
@@ -23,7 +23,6 @@ from database.database import create_tables
 from utils.file_loader import read_uploaded_file, save_uploaded_file
 from ai.weakness_analyzer import analyze_weaknesses
 from ai.mentor_chat import ask_ai_mentor
-from ai.course_generator import generate_course
 import json
 import os
 import streamlit as st
@@ -327,6 +326,13 @@ if page == "Главная":
 
         for uploaded_file in uploaded_files:
 
+            processed_key = f"processed_{uploaded_file.name}_{uploaded_file.size}"
+
+            if processed_key in st.session_state:
+                file_content = st.session_state[processed_key]
+
+                
+            else:
                 if uploaded_file.name.lower().endswith(
                     (".mp4", ".mp3", ".wav", ".m4a", ".webm")
                 ):
@@ -347,6 +353,7 @@ if page == "Главная":
                             continue
                 else:
                     file_content = read_uploaded_file(uploaded_file)
+                st.session_state[processed_key] = file_content
 
                 save_uploaded_file(uploaded_file, file_content)
 
@@ -439,11 +446,10 @@ if page == "Главная":
                                 material_for_course
                             )
                         else:
-                            course_data = generate_course(
+                            course_data = generate_course_by_parts(
                                 client,
                                 material_for_course
                             )
-                        
                         print("STEP 3: Course generated")                 
 
                         st.session_state["course_data"] = course_data
