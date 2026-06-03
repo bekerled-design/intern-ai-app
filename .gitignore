@@ -4,3 +4,4 @@ __pycache__
 *.pyc
 intern_ai.db
 data
+CLAUDE.md
