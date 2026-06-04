@@ -18,7 +18,13 @@ from ui_pages.admin_page import show_admin_page
 
 load_dotenv()
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# timeout — чтобы один зависший вызов не вешал генерацию навсегда (вечный спиннер).
+# max_retries — авто-повтор с backoff при сетевых ошибках и 429 (rate limit).
+client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    timeout=60.0,
+    max_retries=2,
+)
 
 st.set_page_config(
     page_title="Стажировка",

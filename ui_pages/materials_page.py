@@ -97,27 +97,54 @@ def show_materials_page(client):
         if mode == "Подробный":
             st.info("Подробный режим занимает несколько минут.")
 
-        if st.button("Сгенерировать курс", type="primary", key="gen_course_btn"):
+        is_generating = st.session_state.get("generating_course", False)
+
+        if st.button(
+            "Сгенерировать курс",
+            type="primary",
+            key="gen_course_btn",
+            disabled=is_generating,
+        ):
+            # Блокируем повторный запуск: Streamlit перезапускает скрипт на каждый
+            # rerun, и без флага клик мог стартовать вторую генерацию поверх первой.
+            st.session_state["generating_course"] = True
             material = st.session_state.get(
                 "current_upload_material",
                 st.session_state.get("company_material", ""),
             )
+
+            status_text = st.empty()
+            status_text.info("⏳ Подготовка...")
+
+            def report_progress(done, total):
+                if total <= 0:
+                    return
+                if done >= total:
+                    status_text.info("⏳ Собираю тесты и практическое задание...")
+                else:
+                    status_text.info(f"⏳ Обрабатываю часть {done + 1} из {total}...")
+
             try:
-                with st.spinner("ИИ создаёт курс..."):
-                    if mode == "Быстрый":
-                        course_data = generate_course_lite(client, material)
-                    else:
-                        course_data = generate_course_by_parts(client, material)
+                if mode == "Быстрый":
+                    status_text.info("⏳ ИИ создаёт курс...")
+                    course_data = generate_course_lite(client, material)
+                else:
+                    course_data = generate_course_by_parts(
+                        client, material, progress_callback=report_progress
+                    )
 
                 st.session_state["course_data"] = course_data
                 course_id = save_course(user_id, course_data)
                 st.session_state["current_course_id"] = course_id
                 st.session_state["page"] = "Модули"
-                st.success("Курс создан!")
+                status_text.success("✓ Курс создан!")
                 st.rerun()
             except Exception as e:
                 st.error("Ошибка при генерации курса")
                 st.code(str(e))
+            finally:
+                # Снимаем блокировку в любом случае, иначе кнопка останется навсегда disabled.
+                st.session_state["generating_course"] = False
 
     # ── Список загруженных файлов ─────────────────────────────────────────
     st.markdown(

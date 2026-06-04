@@ -315,55 +315,6 @@ def generate_course_module(client, file_content, module_plan):
 
     return response.output_text
 
-def generate_module_tests(client, module):
-
-    response = client.responses.create(
-        model="gpt-4.1-mini",
-        text={
-            "format": {
-                "type": "json_object"
-            }
-        },
-        input=f"""
-Ты — профессиональный методист корпоративного обучения.
-
-Создай тест по модулю.
-
-Название модуля:
-{module["title"]}
-
-Содержание модуля:
-{module["content"]}
-
-Требования:
-
-- Создай 5 вопросов.
-- Проверяй понимание материала.
-- Не задавай очевидные вопросы.
-- Используй только информацию из модуля.
-- Не используй внешние знания.
-- Каждый вопрос должен иметь 4 варианта ответа.
-- Только один вариант должен быть правильным.
-
-Верни JSON:
-Для каждого вопроса запиши название модуля в поле "module".
-{{
-    "questions": [
-        {
-            "module": "Название модуля",
-            "question": "Вопрос",
-            "options": ["1", "2", "3", "4"],
-            "correct_answer": "Правильный ответ"
-        }
-    ]
-}}
-"""
-    )
-
-    data = json.loads(response.output_text)
-
-    return data["questions"]
-
 def generate_course_tests(client, modules):
 
     modules_text = ""
@@ -483,6 +434,9 @@ def generate_module_tests(client, module):
 
 def generate_practical_task(client, modules):
 
+    # Для практического задания достаточно заголовков и описаний модулей —
+    # полный content слать не нужно (задание про применение знаний, а не пересказ).
+    # Это убирает дублирующую отправку всего текста курса в API и экономит токены.
     modules_text = ""
 
     for module in modules:
@@ -492,9 +446,6 @@ def generate_practical_task(client, modules):
 
 Описание:
 {module["description"]}
-
-Содержание:
-{module["content"]}
 
 ---
 """
@@ -601,25 +552,30 @@ def generate_part_modules(client, part_text, part_number):
 
     return data["modules"]
 
-def generate_course_by_parts(client, file_content):
+def generate_course_by_parts(client, file_content, progress_callback=None):
 
     parts = split_text_into_chunks(
         file_content,
         chunk_size=20000,
         overlap=1500
     )
-    print(f"Всего частей: {len(parts)}")
+    total = len(parts)
+    print(f"Всего частей: {total}")
     all_modules = []
 
     for index, part in enumerate(parts):
-        print(f"Обрабатываю часть {index + 1} из {len(parts)}")
+        print(f"Обрабатываю часть {index + 1} из {total}")
+        if progress_callback:
+            progress_callback(index, total)
         part_modules = generate_part_modules(
             client,
             part,
             index + 1
         )
-
         all_modules.extend(part_modules)
+
+    if progress_callback:
+        progress_callback(total, total)
 
     tests = generate_course_tests(
         client,
