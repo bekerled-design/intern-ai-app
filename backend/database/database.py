@@ -99,7 +99,19 @@ CREATE TABLE IF NOT EXISTS activity_log (
     created_at TEXT
 )
 """)
-    
+
+    cursor.execute("""
+CREATE TABLE IF NOT EXISTS course_generation_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    status TEXT DEFAULT 'pending',
+    course_id INTEGER,
+    progress_done INTEGER DEFAULT 0,
+    progress_total INTEGER DEFAULT 0,
+    error TEXT,
+    created_at TEXT
+)
+""")
 
     connection.commit()
     connection.close()
@@ -211,6 +223,24 @@ def save_course(user_id, course_data, due_date=None):
     connection.close()
 
     return course_id
+
+def delete_course(user_id, course_id):
+
+    connection = connect_db()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+    DELETE FROM courses
+    WHERE id = ? AND user_id = ?
+    """, (course_id, user_id))
+
+    cursor.execute("""
+    DELETE FROM course_progress
+    WHERE course_id = ?
+    """, (course_id,))
+
+    connection.commit()
+    connection.close()
 
 def get_user_courses(user_id):
 
@@ -458,6 +488,19 @@ def get_weak_topics(user_id):
 
     return [result[0] for result in results]
 
+def clear_weak_topics(user_id):
+
+    connection = connect_db()
+    cursor = connection.cursor()
+
+    cursor.execute("""
+    DELETE FROM weak_topics
+    WHERE user_id = ?
+    """, (user_id,))
+
+    connection.commit()
+    connection.close()
+
 def save_ai_chat_message(user_id, question, answer):
 
     connection = connect_db()
@@ -612,3 +655,81 @@ def get_user_activity(user_id):
 
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
+
+
+# ─── Course generation jobs ───────────────────────────────────────────────────
+
+def create_job(user_id):
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute("""
+    INSERT INTO course_generation_jobs (user_id, status, created_at)
+    VALUES (?, 'pending', ?)
+    """, (user_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    connection.commit()
+    job_id = cursor.lastrowid
+    connection.close()
+    return job_id
+
+
+def update_job_status(job_id, status, course_id=None, error=None, progress_done=None, progress_total=None):
+    connection = connect_db()
+    cursor = connection.cursor()
+    fields = ["status = ?"]
+    values = [status]
+    if course_id is not None:
+        fields.append("course_id = ?")
+        values.append(course_id)
+    if error is not None:
+        fields.append("error = ?")
+        values.append(error)
+    if progress_done is not None:
+        fields.append("progress_done = ?")
+        values.append(progress_done)
+    if progress_total is not None:
+        fields.append("progress_total = ?")
+        values.append(progress_total)
+    values.append(job_id)
+    cursor.execute(f"UPDATE course_generation_jobs SET {', '.join(fields)} WHERE id = ?", values)
+    connection.commit()
+    connection.close()
+
+
+def get_job(job_id):
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute("""
+    SELECT id, user_id, status, course_id, progress_done, progress_total, error
+    FROM course_generation_jobs WHERE id = ?
+    """, (job_id,))
+    row = cursor.fetchone()
+    connection.close()
+    return row
+
+
+def get_active_job(user_id):
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute("""
+    SELECT id, user_id, status, course_id, progress_done, progress_total, error
+    FROM course_generation_jobs
+    WHERE user_id = ? AND status IN ('pending', 'running')
+    ORDER BY id DESC LIMIT 1
+    """, (user_id,))
+    row = cursor.fetchone()
+    connection.close()
+    return row
+
+
+def get_last_done_job(user_id):
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute("""
+    SELECT id, user_id, status, course_id, progress_done, progress_total, error
+    FROM course_generation_jobs
+    WHERE user_id = ? AND status = 'done' AND course_id IS NOT NULL
+    ORDER BY id DESC LIMIT 1
+    """, (user_id,))
+    row = cursor.fetchone()
+    connection.close()
+    return row

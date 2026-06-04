@@ -1,5 +1,44 @@
 import json
+import re
 from utils.text_search import split_text_into_chunks, search_relevant_chunks
+
+
+def split_material_into_parts(text, chunk_size=10000, overlap=1000):
+    """Split material respecting section headings when present, otherwise by size."""
+    # Detect section headings: "Часть N", "Раздел N", "Модуль N", "Тема N",
+    # numbered lines like "1.", "1)", or markdown headings "#"
+    # Uppercase Cyrillic range А-Я plus Ё (U+0401) which sits outside А-Я in Unicode
+    _UC = r"[А-ЯЁA-Z]"
+    heading_pattern = re.compile(
+        r"(?m)^(?:"
+        r"#{1,3}\s.{5,}"
+        r"|(?:ЧАСТЬ|РАЗДЕЛ|МОДУЛЬ|ТЕМА|CHAPTER|SECTION)\s+\d+\S*"
+        r"|(?:Часть|Раздел|Модуль|Тема)\s+\d+\S*"
+        rf"|\d+\.\s+{_UC}[А-ЯЁA-Z\s]{{4,}}"  # "1. ОБЯЗАННОСТИ МЕНЕДЖЕРА" — all-caps heading
+        r")",
+    )
+    matches = list(heading_pattern.finditer(text))
+
+    # Use heading-based split only if we find at least 2 headings
+    if len(matches) >= 2:
+        parts = []
+        for i, match in enumerate(matches):
+            start = match.start()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            part = text[start:end].strip()
+            if not part:
+                continue
+            # If a single section is very large, split it further
+            if len(part) > chunk_size:
+                sub_parts = split_text_into_chunks(part, chunk_size=chunk_size, overlap=overlap)
+                parts.extend(sub_parts)
+            else:
+                parts.append(part)
+        if parts:
+            return parts
+
+    # Fallback: character-based split
+    return split_text_into_chunks(text, chunk_size=chunk_size, overlap=overlap)
 
 def generate_course(client, file_content):
     course_plan = generate_course_plan(
@@ -495,14 +534,25 @@ def generate_part_modules(client, part_text, part_number):
 
 Создай обучающие модули только по этой части материала.
 
+ШАГ 1 — ПЕРЕД СОЗДАНИЕМ МОДУЛЕЙ:
+Мысленно составь список ВСЕХ самостоятельных тем в этой части.
+Каждый смысловой блок, раздел, инструмент, процесс или регламент — отдельная тема.
+Каждая тема должна стать отдельным модулем.
+
+КОЛИЧЕСТВО МОДУЛЕЙ:
+- обычно 2–5 модулей по одной части
+- если часть маленькая или содержит одну тему — 1 модуль
+- если часть содержит много отдельных тем (заголовки, разделы, шаги) — до 7 модулей
+- ЗАПРЕЩЕНО создавать один обзорный модуль вместо нескольких конкретных
+- ЗАПРЕЩЕНО объединять разные продуктовые, процессные или технические темы в один модуль
+- если материал содержит несколько явно разных тем — каждая тема отдельный модуль
+
 ВАЖНО:
 - используй только эту часть материала
 - не используй внешние знания
 - не придумывай темы
 - не делай краткий пересказ
 - раскрывай темы подробно
-- не создавай больше 4 модулей по одной части
-- если тем мало — создай 1-2 модуля
 - каждый модуль должен быть полноценным уроком, а не кратким описанием
 - каждый модуль должен содержать несколько подробных абзацев
 - не ограничивайся списком тезисов
@@ -554,13 +604,17 @@ def generate_part_modules(client, part_text, part_number):
 
 def generate_course_by_parts(client, file_content, progress_callback=None):
 
-    parts = split_text_into_chunks(
-        file_content,
-        chunk_size=20000,
-        overlap=1500
-    )
+    char_count = len(file_content)
+    word_count = len(file_content.split())
+    parts = split_material_into_parts(file_content, chunk_size=10000, overlap=1000)
     total = len(parts)
-    print(f"Всего частей: {total}")
+
+    print(f"[DIAG] Материал: {char_count} символов, {word_count} слов, частей: {total}")
+    print(f"[DIAG] Первые 300 символов: {file_content[:300]!r}")
+    print(f"[DIAG] Последние 300 символов: {file_content[-300:]!r}")
+    if char_count < 15000:
+        print(f"[DIAG] WARNING: material_text is unexpectedly short ({char_count} chars) for long source material")
+
     all_modules = []
 
     for index, part in enumerate(parts):

@@ -6,7 +6,6 @@ from typing import Optional
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from openai import OpenAI
 from pydantic import BaseModel
@@ -31,14 +30,24 @@ from database.database import (
     save_module_progress,
     get_completed_modules,
     get_all_users,
+    delete_course,
     save_weak_topic,
     get_weak_topics,
+    clear_weak_topics,
     save_ai_chat_message,
     get_ai_chat_history,
     add_activity,
     get_user_activity,
+    create_notification,
+    get_notifications,
+    mark_notification_as_read,
+    create_job,
+    update_job_status,
+    get_job,
+    get_active_job,
+    get_last_done_job,
 )
-from ai.course_generator import generate_course_lite, generate_course_by_parts
+from ai.course_generator import generate_course_by_parts, split_material_into_parts
 from ai.mentor_chat import ask_ai_mentor
 from ai.embeddings import create_embedding
 from ai.weakness_analyzer import analyze_weaknesses
@@ -48,7 +57,10 @@ from ai.recommendations import generate_recommendations
 from utils.text_search import split_text_into_chunks
 from utils.file_loader import read_uploaded_file
 
+# Load .env from backend dir first, then from project root as fallback
 load_dotenv()
+if not os.getenv("OPENAI_API_KEY"):
+    load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 app = FastAPI(title="Intern AI API")
 
@@ -87,11 +99,6 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 class LoginRequest(BaseModel):
     username: str
     password: str
-
-
-class CourseGenerateRequest(BaseModel):
-    mode: str  # "lite" | "detailed"
-    material: str
 
 
 class TestResultRequest(BaseModel):
@@ -201,7 +208,9 @@ async def upload_material(
 
     if not material_exists(user_id, file.filename):
         save_company_material(user_id, file.filename, content)
-        chunks = split_text_into_chunks(content[:500_000])
+        # Use heading-aware split so each semantic section gets its own embedding.
+        # Falls back to character split for materials without structural headings.
+        chunks = split_material_into_parts(content[:500_000], chunk_size=2000, overlap=200)
         for chunk in chunks:
             try:
                 emb = create_embedding(client, chunk)
@@ -220,79 +229,80 @@ def delete_material(file_name: str, user_id: int = Depends(get_current_user)):
     return {"status": "deleted"}
 
 
-# ─── Course generation ────────────────────────────────────────────────────────
+# ─── Course generation (job-based) ───────────────────────────────────────────
 
-@app.post("/courses/generate")
-def generate_course(body: CourseGenerateRequest, user_id: int = Depends(get_current_user)):
-    if body.mode == "lite":
-        course_data = generate_course_lite(client, body.material)
-    else:
-        course_data = generate_course_by_parts(client, body.material)
-    course_id = save_course(user_id, course_data)
-    add_activity(user_id, f"Сгенерировал курс: {course_data.get('course_title', '')}")
-    return {"course_id": course_id, "course": course_data}
+def _run_generation_job(job_id: int, user_id: int, material: str):
+    """Runs in a thread pool. Updates job status in DB throughout."""
+    try:
+        update_job_status(job_id, "running")
+
+        def progress_callback(done, total):
+            if total > 0:
+                update_job_status(job_id, "running", progress_done=done, progress_total=total)
+
+        course_data = generate_course_by_parts(client, material, progress_callback)
+        course_id = save_course(user_id, course_data)
+        add_activity(user_id, f"Сгенерировал курс: {course_data.get('course_title', '')}")
+        update_job_status(job_id, "done", course_id=course_id,
+                          progress_done=0, progress_total=0)
+    except Exception as e:
+        update_job_status(job_id, "error", error=str(e))
 
 
-@app.get("/courses/generate-stream")
-async def generate_course_stream(
-    mode: str,
-    user_id: int = Depends(get_current_user),
-):
+@app.post("/courses/generate-job")
+async def start_generation_job(user_id: int = Depends(get_current_user)):
     materials = get_company_materials(user_id)
     if not materials:
         raise HTTPException(status_code=400, detail="Нет загруженных материалов")
+
+    # Не запускаем вторую генерацию если уже идёт
+    active = get_active_job(user_id)
+    if active:
+        return {"job_id": active[0]}
+
     material = "".join(f"\n\nФайл: {m[0]}\n\n{m[1]}\n\n" for m in materials)
+    job_id = create_job(user_id)
 
-    async def event_stream():
-        loop = asyncio.get_event_loop()
-        progress_queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _run_generation_job, job_id, user_id, material)
 
-        def progress_callback(done, total):
-            if total <= 0:
-                return
-            asyncio.run_coroutine_threadsafe(
-                progress_queue.put({"done": done, "total": total}),
-                loop,
-            )
+    return {"job_id": job_id}
 
-        async def run_generation():
-            if mode == "lite":
-                result = await loop.run_in_executor(
-                    None, generate_course_lite, client, material
-                )
-            else:
-                result = await loop.run_in_executor(
-                    None, generate_course_by_parts, client, material, progress_callback
-                )
-            await progress_queue.put({"done": -1, "course": result})
 
-        task = asyncio.create_task(run_generation())
+@app.get("/courses/generate-job/{job_id}")
+def get_generation_job(job_id: int, user_id: int = Depends(get_current_user)):
+    row = get_job(job_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Job не найден")
+    _, _, status, course_id, progress_done, progress_total, error = row
+    return {
+        "job_id": job_id,
+        "status": status,
+        "course_id": course_id,
+        "progress_done": progress_done,
+        "progress_total": progress_total,
+        "error": error,
+    }
 
-        while True:
-            try:
-                msg = await asyncio.wait_for(progress_queue.get(), timeout=15)
-            except asyncio.TimeoutError:
-                if task.done():
-                    if task.exception():
-                        yield f"event: error\ndata: {json.dumps(str(task.exception()))}\n\n"
-                    break
-                # heartbeat — держим соединение живым пока GPT думает
-                yield ": heartbeat\n\n"
-                continue
 
-            if "course" in msg:
-                course_data = msg["course"]
-                course_id = save_course(user_id, course_data)
-                add_activity(user_id, f"Сгенерировал курс: {course_data.get('course_title', '')}")
-                yield f"event: done\ndata: {json.dumps({'course_id': course_id, 'course': course_data}, ensure_ascii=False)}\n\n"
-                break
-            else:
-                yield f"event: progress\ndata: {json.dumps(msg)}\n\n"
-
-        if not task.done():
-            await task
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+@app.get("/courses/active-job")
+def get_active_generation_job(user_id: int = Depends(get_current_user)):
+    row = get_active_job(user_id)
+    if not row:
+        # Возвращаем последний done-job чтобы фронтенд мог восстановить current_course_id
+        # если страница была закрыта пока генерация шла
+        row = get_last_done_job(user_id)
+    if not row:
+        return {"job": None}
+    _, _, status, course_id, progress_done, progress_total, error = row
+    return {"job": {
+        "job_id": row[0],
+        "status": status,
+        "course_id": course_id,
+        "progress_done": progress_done,
+        "progress_total": progress_total,
+        "error": error,
+    }}
 
 
 # ─── Courses CRUD ─────────────────────────────────────────────────────────────
@@ -343,6 +353,12 @@ def get_course(course_id: int, user_id: int = Depends(get_current_user)):
     return json.loads(row[0])
 
 
+@app.delete("/courses/{course_id}")
+def remove_course(course_id: int, user_id: int = Depends(get_current_user)):
+    delete_course(user_id, course_id)
+    return {"status": "deleted"}
+
+
 @app.get("/courses/{course_id}/progress")
 def course_progress(course_id: int, user_id: int = Depends(get_current_user)):
     completed = get_completed_modules(user_id, course_id)
@@ -365,8 +381,11 @@ def save_progress(
 @app.post("/tests/result")
 def submit_test_result(body: TestResultRequest, user_id: int = Depends(get_current_user)):
     save_test_result(user_id, body.score)
-    for topic in body.weak_topics:
-        save_weak_topic(user_id, topic)
+    if body.weak_topics:
+        for topic in body.weak_topics:
+            save_weak_topic(user_id, topic)
+    else:
+        clear_weak_topics(user_id)
     add_activity(user_id, f"Прошёл тест. Результат: {body.score}%")
     return {"status": "ok"}
 
@@ -450,5 +469,20 @@ def admin_generate_retraining(target_id: int, user_id: int = Depends(get_current
         company_material = "".join(f"\n\nФайл: {m[0]}\n\n{m[1]}\n\n" for m in materials)
     course_data = generate_retraining_course(client, topics, company_material)
     course_id = save_course(target_id, course_data)
-    add_activity(target_id, f"Назначено дополнительное обучение администратором")
+    add_activity(target_id, "Назначено дополнительное обучение администратором")
+    create_notification(target_id, f"Администратор назначил вам дополнительный курс: «{course_data.get('course_title', 'Доп. обучение')}»")
     return {"course_id": course_id, "course": course_data}
+
+
+# ─── Notifications ────────────────────────────────────────────────────────────
+
+@app.get("/notifications")
+def list_notifications(user_id: int = Depends(get_current_user)):
+    notes = get_notifications(user_id)
+    return [{"id": n[0], "message": n[1]} for n in notes]
+
+
+@app.post("/notifications/{note_id}/read")
+def read_notification(note_id: int, user_id: int = Depends(get_current_user)):
+    mark_notification_as_read(note_id)
+    return {"status": "ok"}
