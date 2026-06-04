@@ -66,6 +66,12 @@ CREATE TABLE IF NOT EXISTS course_progress (
     module_index INTEGER
 )
 """)
+    # Idempotent unique index — protects against duplicate progress rows.
+    # Works on existing DBs without a migration.
+    cursor.execute("""
+CREATE UNIQUE INDEX IF NOT EXISTS uq_course_progress
+    ON course_progress (user_id, course_id, module_index)
+""")
 
     cursor.execute("""
 CREATE TABLE IF NOT EXISTS weak_topics (
@@ -400,7 +406,7 @@ def save_module_progress(
     cursor = connection.cursor()
 
     cursor.execute("""
-    INSERT INTO course_progress (
+    INSERT OR IGNORE INTO course_progress (
         user_id,
         course_id,
         module_index
@@ -425,7 +431,7 @@ def get_completed_modules(
     cursor = connection.cursor()
 
     cursor.execute("""
-    SELECT module_index
+    SELECT DISTINCT module_index
     FROM course_progress
     WHERE user_id = ?
     AND course_id = ?

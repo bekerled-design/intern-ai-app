@@ -1,16 +1,23 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import api from "@/lib/api";
-import { ChatMessage } from "@/lib/types";
+import { ChatMessage, CourseData } from "@/lib/types";
 
 export default function MentorPage() {
   const [history, setHistory] = useState<ChatMessage[]>([]);
   const [question, setQuestion] = useState("");
   const [loading, setLoading] = useState(false);
+  const [courseData, setCourseData] = useState<CourseData | null>(null);
+  const loadedCourseId = useRef<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     api.get("/mentor/history").then((r) => setHistory(r.data ?? [])).catch(() => {});
+    const courseId = localStorage.getItem("current_course_id");
+    if (courseId) {
+      loadedCourseId.current = courseId;
+      api.get(`/courses/${courseId}`).then((r) => setCourseData(r.data)).catch(() => {});
+    }
   }, []);
 
   useEffect(() => {
@@ -25,13 +32,16 @@ export default function MentorPage() {
     setLoading(true);
     setHistory((prev) => [...prev, { question: q, answer: "" }]);
     try {
+      // Refresh course data only if course_id changed since last load
       const courseId = localStorage.getItem("current_course_id");
-      let courseData = null;
-      if (courseId) {
+      let currentCourseData = courseData;
+      if (courseId && courseId !== loadedCourseId.current) {
         const r = await api.get(`/courses/${courseId}`);
-        courseData = r.data;
+        currentCourseData = r.data;
+        setCourseData(r.data);
+        loadedCourseId.current = courseId;
       }
-      const r = await api.post("/mentor/ask", { question: q, course_data: courseData });
+      const r = await api.post("/mentor/ask", { question: q, course_data: currentCourseData });
       setHistory((prev) => {
         const updated = [...prev];
         updated[updated.length - 1] = { question: q, answer: r.data.answer };

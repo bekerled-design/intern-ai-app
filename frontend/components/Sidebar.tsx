@@ -27,6 +27,11 @@ export default function Sidebar() {
   const roleLabel = isAdmin ? "Администратор" : "Стажёр";
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [toast, setToast] = useState<string | null>(null);
+  const [hasCourse, setHasCourse] = useState(false);
+
+  useEffect(() => {
+    setHasCourse(!!localStorage.getItem("current_course_id"));
+  }, [pathname]);
 
   useEffect(() => {
     if (!user || isAdmin) return;
@@ -79,7 +84,7 @@ export default function Sidebar() {
       <nav className="flex-1 flex flex-col gap-0.5">
         {NAV.filter((item) => !item.adminOnly || isAdmin).map(({ icon, label, href, needsCourse }) => {
           const active = pathname === href || (href !== "/dashboard" && pathname.startsWith(href));
-          const resolvedHref = needsCourse && !localStorage.getItem("current_course_id") ? "/courses" : href;
+          const resolvedHref = needsCourse && !hasCourse ? "/courses" : href;
           const hasBadge = href === "/courses" && notifications.length > 0;
           const inner = (
             <>

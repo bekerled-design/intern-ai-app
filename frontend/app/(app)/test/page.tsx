@@ -54,9 +54,7 @@ export default function TestPage() {
     setAnswers(updated);
 
     const isLast = current === course.test.length - 1;
-    if (isLast) {
-      handleSubmit(updated);
-    } else {
+    if (!isLast) {
       setTimeout(() => setCurrent((c) => c + 1), 300);
     }
   }
@@ -143,6 +141,7 @@ export default function TestPage() {
   }
 
   const q = questions[current];
+  const isLast = current === questions.length - 1;
   const progressPct = Math.round((current / questions.length) * 100);
 
   return (
@@ -198,13 +197,23 @@ export default function TestPage() {
         >
           ← Назад
         </button>
-        {current in answers && current < questions.length - 1 && (
+        {isLast ? (
           <button
-            onClick={() => setCurrent((c) => c + 1)}
-            className="text-sm font-medium text-[#2563EB] hover:underline px-3 py-1.5"
+            onClick={() => handleSubmit(answers)}
+            disabled={!(current in answers)}
+            className="bg-[#2563EB] text-white font-semibold px-5 py-2 rounded-[10px] text-sm hover:bg-[#1D4ED8] transition-colors disabled:opacity-40"
           >
-            Следующий →
+            Завершить тест
           </button>
+        ) : (
+          current in answers && (
+            <button
+              onClick={() => setCurrent((c) => c + 1)}
+              className="text-sm font-medium text-[#2563EB] hover:underline px-3 py-1.5"
+            >
+              Следующий →
+            </button>
+          )
         )}
       </div>
     </div>
