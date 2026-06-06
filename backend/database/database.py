@@ -119,6 +119,22 @@ CREATE TABLE IF NOT EXISTS course_generation_jobs (
 )
 """)
 
+    cursor.execute("""
+CREATE TABLE IF NOT EXISTS api_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    operation_type TEXT,
+    model TEXT,
+    input_tokens INTEGER DEFAULT 0,
+    output_tokens INTEGER DEFAULT 0,
+    total_tokens INTEGER DEFAULT 0,
+    estimated_cost_usd REAL DEFAULT 0,
+    related_job_id INTEGER,
+    related_course_id INTEGER,
+    created_at TEXT
+)
+""")
+
     connection.commit()
     connection.close()
 
@@ -739,3 +755,72 @@ def get_last_done_job(user_id):
     row = cursor.fetchone()
     connection.close()
     return row
+
+
+# ─── API Usage tracking ───────────────────────────────────────────────────────
+
+def save_api_usage(user_id, operation_type, model, input_tokens, output_tokens,
+                   total_tokens, estimated_cost_usd, related_job_id=None, related_course_id=None):
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute("""
+    INSERT INTO api_usage (user_id, operation_type, model, input_tokens, output_tokens,
+        total_tokens, estimated_cost_usd, related_job_id, related_course_id, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (user_id, operation_type, model, input_tokens, output_tokens,
+          total_tokens, estimated_cost_usd, related_job_id, related_course_id,
+          datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    connection.commit()
+    connection.close()
+
+
+def get_user_api_usage(user_id):
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute("""
+    SELECT operation_type, model, input_tokens, output_tokens, total_tokens,
+           estimated_cost_usd, created_at
+    FROM api_usage WHERE user_id = ? ORDER BY id DESC
+    """, (user_id,))
+    rows = cursor.fetchall()
+    connection.close()
+    return rows
+
+
+def get_total_api_usage():
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute("""
+    SELECT SUM(total_tokens), SUM(estimated_cost_usd) FROM api_usage
+    """)
+    row = cursor.fetchone()
+    connection.close()
+    return row
+
+
+def get_api_usage_summary_by_operation():
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute("""
+    SELECT operation_type, COUNT(*) as calls, SUM(total_tokens) as tokens,
+           SUM(estimated_cost_usd) as cost
+    FROM api_usage GROUP BY operation_type ORDER BY cost DESC
+    """)
+    rows = cursor.fetchall()
+    connection.close()
+    return rows
+
+
+def get_api_usage_summary_by_user():
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute("""
+    SELECT u.username, a.user_id, COUNT(*) as calls,
+           SUM(a.total_tokens) as tokens, SUM(a.estimated_cost_usd) as cost
+    FROM api_usage a
+    LEFT JOIN users u ON u.id = a.user_id
+    GROUP BY a.user_id ORDER BY cost DESC
+    """)
+    rows = cursor.fetchall()
+    connection.close()
+    return rows

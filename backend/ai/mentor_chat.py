@@ -3,6 +3,7 @@ import json
 from ai.embeddings import create_embedding
 from utils.semantic_search import search_similar_chunks
 from database.database import get_material_chunks, get_ai_chat_history
+from utils.usage_tracker import record_openai_usage
 
 # Hard cutoff: only skip LLM if there are literally no chunks at all or all scores
 # are near zero. Rely on the prompt to handle "no information" cases.
@@ -12,7 +13,7 @@ _SIMILARITY_THRESHOLD = 0.05
 def ask_ai_mentor(client, user_id, company_material, course_data, user_question):
     chunks = get_material_chunks(user_id)
 
-    question_embedding_json = create_embedding(client, user_question)
+    question_embedding_json = create_embedding(client, user_question, user_id=user_id)
     question_embedding = json.loads(question_embedding_json)
 
     similar_chunks = search_similar_chunks(
@@ -84,5 +85,7 @@ def ask_ai_mentor(client, user_id, company_material, course_data, user_question)
 {user_question}
 """,
     )
+
+    record_openai_usage(user_id, "mentor", "gpt-4.1-mini", response)
 
     return response.output_text

@@ -1,6 +1,7 @@
 import json
 import re
 from utils.text_search import split_text_into_chunks, search_relevant_chunks
+from utils.usage_tracker import record_openai_usage
 
 
 def split_material_into_parts(text, chunk_size=10000, overlap=1000):
@@ -354,7 +355,7 @@ def generate_course_module(client, file_content, module_plan):
 
     return response.output_text
 
-def generate_course_tests(client, modules):
+def generate_course_tests(client, modules, user_id=None, job_id=None):
 
     modules_text = ""
 
@@ -416,6 +417,10 @@ def generate_course_tests(client, modules):
 """
     )
 
+    if user_id is not None:
+        record_openai_usage(user_id, "course_tests", "gpt-4.1-mini", response,
+                            related_job_id=job_id)
+
     raw_text = response.output_text
     test_data = json.loads(raw_text)
 
@@ -471,7 +476,7 @@ def generate_module_tests(client, module):
 
     return data["test"]
 
-def generate_practical_task(client, modules):
+def generate_practical_task(client, modules, user_id=None, job_id=None):
 
     # Для практического задания достаточно заголовков и описаний модулей —
     # полный content слать не нужно (задание про применение знаний, а не пересказ).
@@ -518,9 +523,13 @@ def generate_practical_task(client, modules):
 """
     )
 
+    if user_id is not None:
+        record_openai_usage(user_id, "course_practical", "gpt-4.1-mini", response,
+                            related_job_id=job_id)
+
     return response.output_text
 
-def generate_part_modules(client, part_text, part_number):
+def generate_part_modules(client, part_text, part_number, user_id=None, job_id=None):
 
     response = client.responses.create(
         model="gpt-4.1-mini",
@@ -598,11 +607,15 @@ def generate_part_modules(client, part_text, part_number):
 """
     )
 
+    if user_id is not None:
+        record_openai_usage(user_id, "course_modules", "gpt-4.1-mini", response,
+                            related_job_id=job_id)
+
     data = json.loads(response.output_text)
 
     return data["modules"]
 
-def generate_course_by_parts(client, file_content, progress_callback=None):
+def generate_course_by_parts(client, file_content, progress_callback=None, user_id=None, job_id=None):
 
     char_count = len(file_content)
     word_count = len(file_content.split())
@@ -624,7 +637,9 @@ def generate_course_by_parts(client, file_content, progress_callback=None):
         part_modules = generate_part_modules(
             client,
             part,
-            index + 1
+            index + 1,
+            user_id=user_id,
+            job_id=job_id,
         )
         all_modules.extend(part_modules)
 
@@ -633,12 +648,16 @@ def generate_course_by_parts(client, file_content, progress_callback=None):
 
     tests = generate_course_tests(
         client,
-        all_modules
+        all_modules,
+        user_id=user_id,
+        job_id=job_id,
     )
 
     practical_task = generate_practical_task(
         client,
-        all_modules
+        all_modules,
+        user_id=user_id,
+        job_id=job_id,
     )
 
     titles_text = "\n".join(f"- {m['title']}" for m in all_modules[:20])

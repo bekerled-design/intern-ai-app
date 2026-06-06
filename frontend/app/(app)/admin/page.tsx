@@ -4,6 +4,14 @@ import { useRouter } from "next/navigation";
 import api from "@/lib/api";
 
 interface UserRow { id: number; username: string }
+interface OpRow { operation: string; calls: number; tokens: number; cost: number }
+interface UserCostRow { username: string; user_id: number; calls: number; tokens: number; cost: number }
+interface UsageSummary {
+  total_tokens: number;
+  total_estimated_cost_usd: number;
+  by_operation: OpRow[];
+  by_user: UserCostRow[];
+}
 
 export default function AdminPage() {
   const router = useRouter();
@@ -14,9 +22,11 @@ export default function AdminPage() {
   const [generating, setGenerating] = useState(false);
   const [genDone, setGenDone] = useState(false);
   const [error, setError] = useState("");
+  const [usage, setUsage] = useState<UsageSummary | null>(null);
 
   useEffect(() => {
     api.get("/admin/users").then((r) => setUsers(r.data)).catch(() => {});
+    api.get("/admin/usage").then((r) => setUsage(r.data)).catch(() => {});
   }, []);
 
   async function selectUser(u: UserRow) {
@@ -175,6 +185,48 @@ export default function AdminPage() {
           )}
         </div>
       </div>
+
+      {/* API Usage */}
+      {usage && (
+        <div className="mt-8">
+          <h2 className="text-[15px] font-semibold text-[#111827] mb-3">Расходы API</h2>
+          <div className="grid grid-cols-2 gap-4 mb-4">
+            <div className="bg-white rounded-2xl border border-[#E5E7EB] p-5">
+              <div className="text-xs text-[#6B7280] mb-1">Примерная стоимость</div>
+              <div className="text-2xl font-bold text-[#111827]">${usage.total_estimated_cost_usd.toFixed(4)}</div>
+              <div className="text-xs text-[#9CA3AF] mt-1">{usage.total_tokens.toLocaleString()} токенов всего</div>
+            </div>
+            <div className="bg-white rounded-2xl border border-[#E5E7EB] p-5">
+              <div className="text-xs text-[#6B7280] mb-2">По операциям</div>
+              {usage.by_operation.length === 0 ? (
+                <div className="text-sm text-[#9CA3AF]">Нет данных</div>
+              ) : (
+                <div className="flex flex-col gap-1">
+                  {usage.by_operation.map((op) => (
+                    <div key={op.operation} className="flex justify-between text-sm">
+                      <span className="text-[#374151]">{op.operation}</span>
+                      <span className="text-[#6B7280]">${op.cost.toFixed(4)} ({op.calls} вызовов)</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+          {usage.by_user.length > 0 && (
+            <div className="bg-white rounded-2xl border border-[#E5E7EB] p-5">
+              <div className="text-xs text-[#6B7280] mb-2">Топ пользователей по расходу</div>
+              <div className="flex flex-col gap-1">
+                {usage.by_user.map((u) => (
+                  <div key={u.user_id} className="flex justify-between text-sm">
+                    <span className="text-[#374151]">{u.username}</span>
+                    <span className="text-[#6B7280]">${u.cost.toFixed(4)} · {u.tokens.toLocaleString()} токенов</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

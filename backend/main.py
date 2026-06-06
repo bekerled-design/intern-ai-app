@@ -46,6 +46,10 @@ from database.database import (
     get_job,
     get_active_job,
     get_last_done_job,
+    get_user_api_usage,
+    get_total_api_usage,
+    get_api_usage_summary_by_operation,
+    get_api_usage_summary_by_user,
 )
 from ai.course_generator import generate_course_by_parts, split_material_into_parts
 from ai.mentor_chat import ask_ai_mentor
@@ -216,7 +220,7 @@ async def upload_material(
         chunks = split_material_into_parts(content[:500_000], chunk_size=2000, overlap=200)
         for chunk in chunks:
             try:
-                emb = create_embedding(client, chunk)
+                emb = create_embedding(client, chunk, user_id=user_id)
                 save_material_chunk(user_id, file.filename, chunk, emb)
             except Exception:
                 continue
@@ -243,7 +247,8 @@ def _run_generation_job(job_id: int, user_id: int, material: str):
             if total > 0:
                 update_job_status(job_id, "running", progress_done=done, progress_total=total)
 
-        course_data = generate_course_by_parts(client, material, progress_callback)
+        course_data = generate_course_by_parts(client, material, progress_callback,
+                                               user_id=user_id, job_id=job_id)
         course_id = save_course(user_id, course_data)
         add_activity(user_id, f"Сгенерировал курс: {course_data.get('course_title', '')}")
         update_job_status(job_id, "done", course_id=course_id,
@@ -475,6 +480,51 @@ def admin_generate_retraining(target_id: int, user_id: int = Depends(get_current
     add_activity(target_id, "Назначено дополнительное обучение администратором")
     create_notification(target_id, f"Администратор назначил вам дополнительный курс: «{course_data.get('course_title', 'Доп. обучение')}»")
     return {"course_id": course_id, "course": course_data}
+
+
+# ─── API Usage ───────────────────────────────────────────────────────────────
+
+@app.get("/admin/usage")
+def admin_usage(user_id: int = Depends(get_current_user)):
+    total_tokens, total_cost = get_total_api_usage()
+    by_op = [
+        {"operation": r[0], "calls": r[1], "tokens": r[2], "cost": round(r[3] or 0, 6)}
+        for r in get_api_usage_summary_by_operation()
+    ]
+    by_user = [
+        {"username": r[0] or f"user_{r[1]}", "user_id": r[1], "calls": r[2],
+         "tokens": r[3], "cost": round(r[4] or 0, 6)}
+        for r in get_api_usage_summary_by_user()
+    ]
+    return {
+        "total_tokens": total_tokens or 0,
+        "total_estimated_cost_usd": round(total_cost or 0, 6),
+        "by_operation": by_op,
+        "by_user": by_user,
+    }
+
+
+@app.get("/users/{target_user_id}/usage")
+def user_usage(target_user_id: int, user_id: int = Depends(get_current_user)):
+    rows = get_user_api_usage(target_user_id)
+    records = [
+        {
+            "operation_type": r[0],
+            "model": r[1],
+            "input_tokens": r[2],
+            "output_tokens": r[3],
+            "total_tokens": r[4],
+            "estimated_cost_usd": r[5],
+            "created_at": r[6],
+        }
+        for r in rows
+    ]
+    total_cost = sum(r["estimated_cost_usd"] for r in records)
+    return {
+        "user_id": target_user_id,
+        "total_estimated_cost_usd": round(total_cost, 6),
+        "records": records,
+    }
 
 
 # ─── Notifications ────────────────────────────────────────────────────────────
