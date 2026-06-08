@@ -23,8 +23,13 @@ export default function Sidebar() {
   const router = useRouter();
   const user = getUser();
   const initial = user?.username?.[0]?.toUpperCase() ?? "U";
-  const isAdmin = user?.role === "admin" || user?.username?.toLowerCase() === "admin";
-  const roleLabel = isAdmin ? "Администратор" : "Стажёр";
+  const companyRole = user?.company_role;
+  const isAdmin = companyRole === "owner" || companyRole === "admin" ||
+                  user?.role === "admin" || user?.username?.toLowerCase() === "admin";
+  const roleLabel = companyRole === "owner" ? "Владелец"
+    : companyRole === "admin" ? "Администратор"
+    : companyRole === "employee" ? "Сотрудник"
+    : user?.role === "admin" ? "Администратор" : "Стажёр";
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [toast, setToast] = useState<string | null>(null);
   const [hasCourse, setHasCourse] = useState(false);

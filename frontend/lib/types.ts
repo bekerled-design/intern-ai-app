@@ -2,7 +2,9 @@ export interface User {
   user_id: number;
   username: string;
   token: string;
-  role: "admin" | "intern";
+  role: "admin" | "intern";        // legacy field kept for backward compat
+  company_role: "owner" | "admin" | "employee";
+  company_id: number | null;
 }
 
 export interface Course {

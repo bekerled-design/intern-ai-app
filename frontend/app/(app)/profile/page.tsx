@@ -24,6 +24,7 @@ export default function ProfilePage() {
   const [activity, setActivity] = useState<{ action: string; created_at: string }[]>([]);
   const [analysis, setAnalysis] = useState<string | null>(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [companyName, setCompanyName] = useState<string | null>(null);
 
   useEffect(() => {
     api.get("/tests/results").then((r) => setScores(r.data.scores ?? [])).catch(() => {});
@@ -39,13 +40,19 @@ export default function ProfilePage() {
       }
     }).catch(() => {});
     api.get("/activity").then((r) => setActivity(r.data ?? [])).catch(() => {});
+    api.get("/company/me").then((r) => setCompanyName(r.data.name ?? null)).catch(() => {});
   }, []);
 
   const avgScore = scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : null;
   const bestScore = scores.length ? Math.max(...scores) : null;
   const initial = user?.username?.[0]?.toUpperCase() ?? "U";
-  const isAdmin = user?.role === "admin" || user?.username?.toLowerCase() === "admin";
-  const roleLabel = isAdmin ? "Администратор" : "Стажёр";
+  const companyRole = user?.company_role;
+  const isAdmin = companyRole === "owner" || companyRole === "admin" ||
+                  user?.role === "admin" || user?.username?.toLowerCase() === "admin";
+  const roleLabel = companyRole === "owner" ? "Владелец"
+    : companyRole === "admin" ? "Администратор"
+    : companyRole === "employee" ? "Сотрудник"
+    : isAdmin ? "Администратор" : "Стажёр";
 
   return (
     <div>
@@ -59,6 +66,9 @@ export default function ProfilePage() {
         <div>
           <div className="text-lg font-bold text-[#111827]">{user?.username}</div>
           <div className={`text-sm font-medium mt-0.5 ${isAdmin ? "text-[#D97706]" : "text-[#6B7280]"}`}>{roleLabel}</div>
+          {companyName && (
+            <div className="text-xs text-[#9CA3AF] mt-0.5">{companyName}</div>
+          )}
         </div>
       </div>
 

@@ -19,6 +19,7 @@ from database.database import (
     get_course_by_id,
     save_course,
     get_company_materials,
+    get_company_materials_by_company,
     save_company_material,
     delete_company_material,
     delete_material_chunks,
@@ -50,6 +51,25 @@ from database.database import (
     get_total_api_usage,
     get_api_usage_summary_by_operation,
     get_api_usage_summary_by_user,
+    # company layer
+    create_company,
+    get_company,
+    get_user_company,
+    get_company_users,
+    set_user_company,
+    set_user_role,
+    get_user_role,
+    get_company_id_for_user,
+    set_material_company,
+    get_course_company_id,
+    get_api_usage_summary_by_operation_for_company,
+    get_total_api_usage_for_company,
+    get_api_usage_summary_by_user_for_company,
+    # invite code layer
+    get_company_by_invite_code,
+    get_company_invite_code,
+    regenerate_company_invite_code,
+    generate_invite_code,
 )
 from ai.course_generator import generate_course_by_parts, split_material_into_parts
 from ai.mentor_chat import ask_ai_mentor
@@ -110,6 +130,12 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+    invite_code: Optional[str] = None
+
+
 class TestResultRequest(BaseModel):
     score: int
     weak_topics: list[str] = []
@@ -139,19 +165,52 @@ def health():
 
 # ─── Auth endpoints ───────────────────────────────────────────────────────────
 
-def _role(username: str) -> str:
-    return "admin" if username.lower() == "admin" else "intern"
+def _auth_response(user_id: int, username: str):
+    """Build unified auth response with company_id and role."""
+    row = get_user_company(user_id)
+    company_id = row[0] if row else None
+    role = row[2] if row else "employee"
+    # Legacy compat: map owner/admin -> "admin", employee -> "intern"
+    legacy_role = "admin" if role in ("owner", "admin") else "intern"
+    return {
+        "token": str(user_id),
+        "user_id": user_id,
+        "username": username,
+        "role": legacy_role,
+        "company_role": role,
+        "company_id": company_id,
+    }
 
 
 @app.post("/auth/register")
-def register(body: LoginRequest):
+def register(body: RegisterRequest):
+    # Existing user: just log them in (backward compat)
     if username_exists(body.username):
         user = get_user(body.username, body.password)
         if not user:
             raise HTTPException(status_code=401, detail="Неверный пароль")
-        return {"token": str(user[0]), "user_id": user[0], "username": body.username, "role": _role(body.username)}
-    user_id = create_user(body.username, body.password)
-    return {"token": str(user_id), "user_id": user_id, "username": body.username, "role": _role(body.username)}
+        return _auth_response(user[0], body.username)
+
+    invite_code = (body.invite_code or "").strip().upper()
+
+    if invite_code:
+        # Join an existing company as employee
+        company_row = get_company_by_invite_code(invite_code)
+        if not company_row:
+            raise HTTPException(status_code=400, detail="Неверный код приглашения")
+        target_company_id = company_row[0]
+        user_id = create_user(body.username, body.password)
+        set_user_company(user_id, target_company_id)
+        set_user_role(user_id, "employee")
+    else:
+        # Create a new company, user becomes owner
+        user_id = create_user(body.username, body.password)
+        new_code = generate_invite_code()
+        company_id = create_company(f"Компания {body.username}", user_id, invite_code=new_code)
+        set_user_company(user_id, company_id)
+        set_user_role(user_id, "owner")
+
+    return _auth_response(user_id, body.username)
 
 
 @app.post("/auth/login")
@@ -161,8 +220,7 @@ def login(body: LoginRequest):
     user = get_user(body.username, body.password)
     if not user:
         raise HTTPException(status_code=401, detail="Неверный пароль")
-    user_id = user[0]
-    return {"token": str(user_id), "user_id": user_id, "username": body.username, "role": _role(body.username)}
+    return _auth_response(user[0], body.username)
 
 
 # ─── Materials endpoints ──────────────────────────────────────────────────────
@@ -219,8 +277,9 @@ async def upload_material(
 
     if not material_exists(user_id, file.filename):
         save_company_material(user_id, file.filename, content)
-        # Use heading-aware split so each semantic section gets its own embedding.
-        # Falls back to character split for materials without structural headings.
+        company_id = get_company_id_for_user(user_id)
+        if company_id:
+            set_material_company(user_id, file.filename, company_id)
         chunks = split_material_into_parts(content[:500_000], chunk_size=2000, overlap=200)
         for chunk in chunks:
             try:
@@ -242,7 +301,7 @@ def delete_material(file_name: str, user_id: int = Depends(get_current_user)):
 
 # ─── Course generation (job-based) ───────────────────────────────────────────
 
-def _run_generation_job(job_id: int, user_id: int, material: str):
+def _run_generation_job(job_id: int, user_id: int, material: str, company_id=None):
     """Runs in a thread pool. Updates job status in DB throughout."""
     try:
         update_job_status(job_id, "running")
@@ -253,7 +312,7 @@ def _run_generation_job(job_id: int, user_id: int, material: str):
 
         course_data = generate_course_by_parts(client, material, progress_callback,
                                                user_id=user_id, job_id=job_id)
-        course_id = save_course(user_id, course_data)
+        course_id = save_course(user_id, course_data, company_id=company_id)
         add_activity(user_id, f"Сгенерировал курс: {course_data.get('course_title', '')}")
         update_job_status(job_id, "done", course_id=course_id,
                           progress_done=0, progress_total=0)
@@ -267,16 +326,16 @@ async def start_generation_job(user_id: int = Depends(get_current_user)):
     if not materials:
         raise HTTPException(status_code=400, detail="Нет загруженных материалов")
 
-    # Не запускаем вторую генерацию если уже идёт
     active = get_active_job(user_id)
     if active:
         return {"job_id": active[0]}
 
+    company_id = get_company_id_for_user(user_id)
     material = "".join(f"\n\nФайл: {m[0]}\n\n{m[1]}\n\n" for m in materials)
-    job_id = create_job(user_id)
+    job_id = create_job(user_id, company_id=company_id)
 
     loop = asyncio.get_event_loop()
-    loop.run_in_executor(None, _run_generation_job, job_id, user_id, material)
+    loop.run_in_executor(None, _run_generation_job, job_id, user_id, material, company_id)
 
     return {"job_id": job_id}
 
@@ -362,6 +421,13 @@ def get_course(course_id: int, user_id: int = Depends(get_current_user)):
     row = get_course_by_id(course_id)
     if not row:
         raise HTTPException(status_code=404, detail="Курс не найден")
+    # Company isolation: course must belong to the same company as the requester.
+    # Courses with NULL company_id (legacy) are accessible to any authenticated user.
+    course_company = get_course_company_id(course_id)
+    if course_company is not None:
+        requester_company = get_company_id_for_user(user_id)
+        if requester_company != course_company:
+            raise HTTPException(status_code=403, detail="Нет доступа к этому курсу")
     return json.loads(row[0])
 
 
@@ -427,8 +493,12 @@ def weakness_analysis(user_id: int = Depends(get_current_user)):
 
 @app.post("/mentor/ask")
 def mentor_ask(body: MentorRequest, user_id: int = Depends(get_current_user)):
-    materials = get_company_materials(user_id)
-    company_material = "".join(f"\n\nФайл: {m[0]}\n\n{m[1]}\n\n" for m in materials)
+    company_id = get_company_id_for_user(user_id)
+    if company_id is not None:
+        _mats = get_company_materials_by_company(company_id)
+        company_material = "".join(f"\n\nФайл: {m[0]}\n\n{m[1]}\n\n" for m in _mats)
+    else:
+        company_material = ""
 
     answer = ask_ai_mentor(
         client,
@@ -436,6 +506,7 @@ def mentor_ask(body: MentorRequest, user_id: int = Depends(get_current_user)):
         company_material,
         body.course_data or {},
         body.question,
+        company_id=company_id,
     )
     save_ai_chat_message(user_id, body.question, answer)
     return {"answer": answer}
@@ -457,30 +528,51 @@ def activity(user_id: int = Depends(get_current_user)):
 
 # ─── Admin ────────────────────────────────────────────────────────────────────
 
+def _require_company_access(user_id: int, target_user_id: int):
+    """Raise 403 if target_user is not in the same company as user_id."""
+    my_company = get_company_id_for_user(user_id)
+    their_company = get_company_id_for_user(target_user_id)
+    if my_company is not None and their_company is not None and my_company != their_company:
+        raise HTTPException(status_code=403, detail="Нет доступа к пользователям другой компании")
+
+
+def _require_admin_or_owner(user_id: int):
+    role = get_user_role(user_id)
+    if role not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Требуются права администратора")
+
+
 @app.get("/admin/users")
 def admin_users(user_id: int = Depends(get_current_user)):
-    users = get_all_users()
-    return [{"id": u[0], "username": u[1]} for u in users]
+    _require_admin_or_owner(user_id)
+    company_id = get_company_id_for_user(user_id)
+    users = get_all_users(company_id=company_id)
+    return [{"id": u[0], "username": u[1], "role": u[2]} for u in users]
 
 
 @app.get("/admin/users/{target_id}/weak-topics")
 def admin_user_weak_topics(target_id: int, user_id: int = Depends(get_current_user)):
+    _require_admin_or_owner(user_id)
+    _require_company_access(user_id, target_id)
     topics = get_weak_topics(target_id)
     return {"topics": topics}
 
 
 @app.post("/admin/users/{target_id}/retraining")
 def admin_generate_retraining(target_id: int, user_id: int = Depends(get_current_user)):
+    _require_admin_or_owner(user_id)
+    _require_company_access(user_id, target_id)
     topics = get_weak_topics(target_id)
     if not topics:
         raise HTTPException(status_code=400, detail="У пользователя нет слабых тем")
+    company_id = get_company_id_for_user(user_id)
     materials = get_company_materials(target_id)
     company_material = "".join(f"\n\nФайл: {m[0]}\n\n{m[1]}\n\n" for m in materials)
     if not company_material.strip():
         materials = get_company_materials(user_id)
         company_material = "".join(f"\n\nФайл: {m[0]}\n\n{m[1]}\n\n" for m in materials)
     course_data = generate_retraining_course(client, topics, company_material)
-    course_id = save_course(target_id, course_data)
+    course_id = save_course(target_id, course_data, company_id=company_id)
     add_activity(target_id, "Назначено дополнительное обучение администратором")
     create_notification(target_id, f"Администратор назначил вам дополнительный курс: «{course_data.get('course_title', 'Доп. обучение')}»")
     return {"course_id": course_id, "course": course_data}
@@ -490,17 +582,33 @@ def admin_generate_retraining(target_id: int, user_id: int = Depends(get_current
 
 @app.get("/admin/usage")
 def admin_usage(user_id: int = Depends(get_current_user)):
-    total_tokens, total_cost = get_total_api_usage()
-    by_op = [
-        {"operation": r[0], "calls": r[1], "tokens": r[2], "cost": round(r[3] or 0, 6),
-         "duration_minutes": round(r[4] or 0, 4)}
-        for r in get_api_usage_summary_by_operation()
-    ]
-    by_user = [
-        {"username": r[0] or f"user_{r[1]}", "user_id": r[1], "calls": r[2],
-         "tokens": r[3], "cost": round(r[4] or 0, 6)}
-        for r in get_api_usage_summary_by_user()
-    ]
+    _require_admin_or_owner(user_id)
+    company_id = get_company_id_for_user(user_id)
+    if company_id is not None:
+        total_tokens, total_cost = get_total_api_usage_for_company(company_id)
+        by_op = [
+            {"operation": r[0], "calls": r[1], "tokens": r[2], "cost": round(r[3] or 0, 6),
+             "duration_minutes": round(r[4] or 0, 4)}
+            for r in get_api_usage_summary_by_operation_for_company(company_id)
+        ]
+        by_user = [
+            {"username": r[0] or f"user_{r[1]}", "user_id": r[1], "calls": r[2],
+             "tokens": r[3], "cost": round(r[4] or 0, 6)}
+            for r in get_api_usage_summary_by_user_for_company(company_id)
+        ]
+    else:
+        # Fallback for legacy users without company
+        total_tokens, total_cost = get_total_api_usage()
+        by_op = [
+            {"operation": r[0], "calls": r[1], "tokens": r[2], "cost": round(r[3] or 0, 6),
+             "duration_minutes": round(r[4] or 0, 4)}
+            for r in get_api_usage_summary_by_operation()
+        ]
+        by_user = [
+            {"username": r[0] or f"user_{r[1]}", "user_id": r[1], "calls": r[2],
+             "tokens": r[3], "cost": round(r[4] or 0, 6)}
+            for r in get_api_usage_summary_by_user()
+        ]
     return {
         "total_tokens": total_tokens or 0,
         "total_estimated_cost_usd": round(total_cost or 0, 6),
@@ -530,6 +638,66 @@ def user_usage(target_user_id: int, user_id: int = Depends(get_current_user)):
         "total_estimated_cost_usd": round(total_cost, 6),
         "records": records,
     }
+
+
+# ─── Company endpoints ───────────────────────────────────────────────────────
+
+class RoleUpdateRequest(BaseModel):
+    role: str  # "admin" or "employee"
+
+
+@app.get("/company/me")
+def company_me(user_id: int = Depends(get_current_user)):
+    row = get_user_company(user_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Компания не найдена")
+    company_id, company_name, role = row
+    users = get_company_users(company_id) if company_id else []
+    # Expose invite_code only to owner/admin
+    invite_code = None
+    if role in ("owner", "admin") and company_id:
+        invite_code = get_company_invite_code(company_id)
+    return {
+        "company_id": company_id,
+        "name": company_name,
+        "role": role,
+        "users_count": len(users),
+        "invite_code": invite_code,
+    }
+
+
+@app.post("/company/invite-code/regenerate")
+def regenerate_invite_code(user_id: int = Depends(get_current_user)):
+    _require_admin_or_owner(user_id)
+    company_id = get_company_id_for_user(user_id)
+    if not company_id:
+        raise HTTPException(status_code=404, detail="Компания не найдена")
+    new_code = regenerate_company_invite_code(company_id)
+    return {"invite_code": new_code}
+
+
+@app.get("/company/users")
+def company_users(user_id: int = Depends(get_current_user)):
+    _require_admin_or_owner(user_id)
+    company_id = get_company_id_for_user(user_id)
+    if not company_id:
+        return []
+    users = get_company_users(company_id)
+    return [{"id": u[0], "username": u[1], "role": u[2]} for u in users]
+
+
+@app.patch("/company/users/{target_id}/role")
+def update_user_role(target_id: int, body: RoleUpdateRequest, user_id: int = Depends(get_current_user)):
+    if get_user_role(user_id) != "owner":
+        raise HTTPException(status_code=403, detail="Только владелец может менять роли")
+    if target_id == user_id:
+        raise HTTPException(status_code=400, detail="Нельзя изменить собственную роль")
+    _require_company_access(user_id, target_id)
+    allowed = {"admin", "employee"}
+    if body.role not in allowed:
+        raise HTTPException(status_code=400, detail=f"Допустимые роли: {allowed}")
+    set_user_role(target_id, body.role)
+    return {"status": "ok", "user_id": target_id, "role": body.role}
 
 
 # ─── Notifications ────────────────────────────────────────────────────────────

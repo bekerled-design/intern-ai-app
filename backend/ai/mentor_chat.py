@@ -2,7 +2,7 @@ import json
 
 from ai.embeddings import create_embedding
 from utils.semantic_search import search_similar_chunks
-from database.database import get_material_chunks, get_ai_chat_history
+from database.database import get_company_material_chunks, get_ai_chat_history
 from utils.usage_tracker import record_openai_usage
 
 # Hard cutoff: only skip LLM if there are literally no chunks at all or all scores
@@ -10,8 +10,14 @@ from utils.usage_tracker import record_openai_usage
 _SIMILARITY_THRESHOLD = 0.05
 
 
-def ask_ai_mentor(client, user_id, company_material, course_data, user_question):
-    chunks = get_material_chunks(user_id)
+def ask_ai_mentor(client, user_id, company_material, course_data, user_question, company_id=None):
+    if company_id is not None:
+        chunks = get_company_material_chunks(company_id)
+    else:
+        chunks = []
+
+    if not chunks:
+        return "В материалах компании пока нет данных для ответа."
 
     question_embedding_json = create_embedding(client, user_question, user_id=user_id)
     question_embedding = json.loads(question_embedding_json)
@@ -23,7 +29,6 @@ def ask_ai_mentor(client, user_id, company_material, course_data, user_question)
         limit=8,
     )
 
-    # Confidence gate: check if the best match is relevant enough
     if not similar_chunks:
         return "В загруженных материалах нет информации по этому вопросу."
 

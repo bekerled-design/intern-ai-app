@@ -2,8 +2,9 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import api from "@/lib/api";
+import { getUser } from "@/lib/auth";
 
-interface UserRow { id: number; username: string }
+interface UserRow { id: number; username: string; role?: string }
 interface OpRow { operation: string; calls: number; tokens: number; cost: number }
 interface UserCostRow { username: string; user_id: number; calls: number; tokens: number; cost: number }
 interface UsageSummary {
@@ -15,6 +16,8 @@ interface UsageSummary {
 
 export default function AdminPage() {
   const router = useRouter();
+  const user = getUser();
+  const companyRole = user?.company_role;
   const [users, setUsers] = useState<UserRow[]>([]);
   const [selectedUser, setSelectedUser] = useState<UserRow | null>(null);
   const [weakTopics, setWeakTopics] = useState<string[]>([]);
@@ -23,11 +26,36 @@ export default function AdminPage() {
   const [genDone, setGenDone] = useState(false);
   const [error, setError] = useState("");
   const [usage, setUsage] = useState<UsageSummary | null>(null);
+  const [inviteCode, setInviteCode] = useState<string | null>(null);
+  const [inviteCopied, setInviteCopied] = useState(false);
+  const [inviteRegenerating, setInviteRegenerating] = useState(false);
 
   useEffect(() => {
     api.get("/admin/users").then((r) => setUsers(r.data)).catch(() => {});
     api.get("/admin/usage").then((r) => setUsage(r.data)).catch(() => {});
+    api.get("/company/me").then((r) => {
+      if (r.data.invite_code) setInviteCode(r.data.invite_code);
+    }).catch(() => {});
   }, []);
+
+  async function handleCopyCode() {
+    if (!inviteCode) return;
+    await navigator.clipboard.writeText(inviteCode).catch(() => {});
+    setInviteCopied(true);
+    setTimeout(() => setInviteCopied(false), 2000);
+  }
+
+  async function handleRegenerateCode() {
+    setInviteRegenerating(true);
+    try {
+      const r = await api.post("/company/invite-code/regenerate", {});
+      setInviteCode(r.data.invite_code);
+    } catch {
+      // silent
+    } finally {
+      setInviteRegenerating(false);
+    }
+  }
 
   async function selectUser(u: UserRow) {
     setSelectedUser(u);
@@ -92,11 +120,20 @@ export default function AdminPage() {
                     <div className="w-8 h-8 rounded-full bg-[#2563EB] text-white flex items-center justify-center text-sm font-bold shrink-0">
                       {u.username[0]?.toUpperCase()}
                     </div>
-                    <div>
+                    <div className="flex-1 min-w-0">
                       <div className="text-sm font-semibold text-[#111827]">{u.username}</div>
                       <div className="text-xs text-[#9CA3AF]">ID: {u.id}</div>
                     </div>
-                    {isSelected && <div className="ml-auto text-[#2563EB] text-sm">✓</div>}
+                    {u.role && (
+                      <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full shrink-0 ${
+                        u.role === "owner" ? "bg-[#FEF3C7] text-[#92400E]" :
+                        u.role === "admin" ? "bg-[#EEF2FF] text-[#2563EB]" :
+                        "bg-[#F3F4F6] text-[#6B7280]"
+                      }`}>
+                        {u.role === "owner" ? "Владелец" : u.role === "admin" ? "Админ" : "Сотрудник"}
+                      </span>
+                    )}
+                    {isSelected && <div className="ml-1 text-[#2563EB] text-sm">✓</div>}
                   </button>
                 );
               })}
@@ -185,6 +222,42 @@ export default function AdminPage() {
           )}
         </div>
       </div>
+
+      {/* Invite block — owner/admin only */}
+      {(companyRole === "owner" || companyRole === "admin") && (
+        <div className="mt-8">
+          <h2 className="text-[15px] font-semibold text-[#111827] mb-3">Приглашение сотрудников</h2>
+          <div className="bg-white rounded-2xl border border-[#E5E7EB] p-6">
+            <p className="text-xs text-[#6B7280] mb-4">
+              Передайте этот код сотруднику. При регистрации он введёт код и автоматически попадёт в вашу компанию.
+            </p>
+            {inviteCode ? (
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="flex-1 bg-[#F3F4F6] rounded-[10px] px-4 py-3 font-mono text-lg font-bold text-[#111827] tracking-widest text-center select-all">
+                    {inviteCode}
+                  </div>
+                  <button
+                    onClick={handleCopyCode}
+                    className="px-4 py-3 bg-[#2563EB] text-white text-sm font-semibold rounded-[10px] hover:bg-[#1D4ED8] transition-colors whitespace-nowrap"
+                  >
+                    {inviteCopied ? "Скопировано!" : "Скопировать"}
+                  </button>
+                </div>
+                <button
+                  onClick={handleRegenerateCode}
+                  disabled={inviteRegenerating}
+                  className="text-xs text-[#6B7280] hover:text-[#374151] transition-colors text-left disabled:opacity-50"
+                >
+                  {inviteRegenerating ? "Генерирую новый код..." : "Сгенерировать новый код (старый перестанет работать)"}
+                </button>
+              </div>
+            ) : (
+              <div className="text-sm text-[#9CA3AF]">Загрузка кода...</div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* API Usage */}
       {usage && (

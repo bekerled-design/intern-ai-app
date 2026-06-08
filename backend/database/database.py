@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import secrets
 import sqlite3
 from datetime import datetime
 
@@ -17,10 +18,21 @@ def create_tables():
     cursor = connection.cursor()
 
     cursor.execute("""
+CREATE TABLE IF NOT EXISTS companies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    owner_user_id INTEGER,
+    created_at TEXT
+)
+""")
+
+    cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE,
-    password_hash TEXT
+    password_hash TEXT,
+    company_id INTEGER,
+    role TEXT DEFAULT 'employee'
 )
 """)
 
@@ -135,14 +147,138 @@ CREATE TABLE IF NOT EXISTS api_usage (
     created_at TEXT
 )
 """)
-    # Safe migration for existing databases — no-op if column already exists.
-    try:
-        cursor.execute("ALTER TABLE api_usage ADD COLUMN duration_minutes REAL DEFAULT 0")
-        connection.commit()
-    except Exception:
-        pass
+    # ── Safe migrations for existing databases (no-op if column already exists) ──
+    _safe_alters = [
+        # duration_minutes was added in a prior migration
+        "ALTER TABLE api_usage ADD COLUMN duration_minutes REAL DEFAULT 0",
+        # company / role layer
+        "ALTER TABLE users ADD COLUMN company_id INTEGER",
+        "ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'employee'",
+        "ALTER TABLE company_materials ADD COLUMN company_id INTEGER",
+        "ALTER TABLE material_chunks ADD COLUMN company_id INTEGER",
+        "ALTER TABLE courses ADD COLUMN company_id INTEGER",
+        "ALTER TABLE course_generation_jobs ADD COLUMN company_id INTEGER",
+        "ALTER TABLE api_usage ADD COLUMN company_id INTEGER",
+        # invite code layer
+        "ALTER TABLE companies ADD COLUMN invite_code TEXT",
+    ]
+    for stmt in _safe_alters:
+        try:
+            cursor.execute(stmt)
+        except Exception:
+            pass
 
     connection.commit()
+
+    # ── Seed: migrate existing users to a Default Company if needed ──────────
+    cursor.execute("SELECT id FROM users WHERE company_id IS NULL LIMIT 1")
+    if cursor.fetchone():
+        # Create (or reuse) the default company
+        cursor.execute("SELECT id FROM companies WHERE name = 'Default Company' LIMIT 1")
+        row = cursor.fetchone()
+        if row:
+            default_company_id = row[0]
+        else:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cursor.execute(
+                "INSERT INTO companies (name, owner_user_id, created_at) VALUES (?, ?, ?)",
+                ("Default Company", None, now),
+            )
+            default_company_id = cursor.lastrowid
+
+        # Assign all unassigned users to Default Company as employee
+        cursor.execute(
+            "UPDATE users SET company_id = ?, role = 'employee' WHERE company_id IS NULL",
+            (default_company_id,),
+        )
+        # Make the first user the owner
+        cursor.execute("SELECT id FROM users ORDER BY id ASC LIMIT 1")
+        first_user = cursor.fetchone()
+        if first_user:
+            cursor.execute(
+                "UPDATE users SET role = 'owner' WHERE id = ?",
+                (first_user[0],),
+            )
+            cursor.execute(
+                "UPDATE companies SET owner_user_id = ? WHERE id = ?",
+                (first_user[0], default_company_id),
+            )
+        connection.commit()
+
+    # ── Seed: migrate courses with company_id = NULL to their owner's company ──
+    cursor.execute("SELECT id, user_id FROM courses WHERE company_id IS NULL")
+    null_courses = cursor.fetchall()
+    if null_courses:
+        for course_id, course_user_id in null_courses:
+            if course_user_id is not None:
+                cursor.execute("SELECT company_id FROM users WHERE id = ?", (course_user_id,))
+                u_row = cursor.fetchone()
+                owner_company = u_row[0] if u_row else None
+            else:
+                owner_company = None
+            if owner_company is None:
+                # Fallback to Default Company
+                cursor.execute("SELECT id FROM companies WHERE name = 'Default Company' LIMIT 1")
+                dc = cursor.fetchone()
+                owner_company = dc[0] if dc else None
+            if owner_company is not None:
+                cursor.execute(
+                    "UPDATE courses SET company_id = ? WHERE id = ?",
+                    (owner_company, course_id),
+                )
+        connection.commit()
+
+    # ── Seed: migrate material_chunks with company_id = NULL ──────────────────
+    cursor.execute("SELECT id, user_id FROM material_chunks WHERE company_id IS NULL")
+    null_chunks = cursor.fetchall()
+    if null_chunks:
+        for chunk_id, chunk_user_id in null_chunks:
+            if chunk_user_id is not None:
+                cursor.execute("SELECT company_id FROM users WHERE id = ?", (chunk_user_id,))
+                u_row = cursor.fetchone()
+                chunk_company = u_row[0] if u_row else None
+            else:
+                chunk_company = None
+            if chunk_company is not None:
+                cursor.execute(
+                    "UPDATE material_chunks SET company_id = ? WHERE id = ?",
+                    (chunk_company, chunk_id),
+                )
+        connection.commit()
+
+    # ── Seed: migrate company_materials with company_id = NULL ────────────────
+    cursor.execute("SELECT id, user_id FROM company_materials WHERE company_id IS NULL")
+    null_mats = cursor.fetchall()
+    if null_mats:
+        for mat_id, mat_user_id in null_mats:
+            if mat_user_id is not None:
+                cursor.execute("SELECT company_id FROM users WHERE id = ?", (mat_user_id,))
+                u_row = cursor.fetchone()
+                mat_company = u_row[0] if u_row else None
+            else:
+                mat_company = None
+            if mat_company is not None:
+                cursor.execute(
+                    "UPDATE company_materials SET company_id = ? WHERE id = ?",
+                    (mat_company, mat_id),
+                )
+        connection.commit()
+
+    # ── Seed: generate invite_code for companies that don't have one ──────────
+    cursor.execute("SELECT id FROM companies WHERE invite_code IS NULL")
+    companies_without_code = cursor.fetchall()
+    for (cid,) in companies_without_code:
+        code = _generate_invite_code_value()
+        # Ensure uniqueness in the unlikely collision case
+        while True:
+            cursor.execute("SELECT id FROM companies WHERE invite_code = ?", (code,))
+            if not cursor.fetchone():
+                break
+            code = _generate_invite_code_value()
+        cursor.execute("UPDATE companies SET invite_code = ? WHERE id = ?", (code, cid))
+    if companies_without_code:
+        connection.commit()
+
     connection.close()
 
 def save_test_result(user_id, score):
@@ -225,7 +361,7 @@ def get_user(username, password):
 
 
 
-def save_course(user_id, course_data, due_date=None):
+def save_course(user_id, course_data, due_date=None, company_id=None):
 
     connection = connect_db()
     cursor = connection.cursor()
@@ -235,14 +371,16 @@ def save_course(user_id, course_data, due_date=None):
         user_id,
         course_title,
         content,
-        due_date
+        due_date,
+        company_id
     )
-    VALUES (?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?)
     """, (
         user_id,
         course_data["course_title"],
         json.dumps(course_data, ensure_ascii=False),
-        due_date
+        due_date,
+        company_id,
     ))
 
     connection.commit()
@@ -288,6 +426,16 @@ def get_user_courses(user_id):
     connection.close()
 
     return courses
+
+def get_course_company_id(course_id: int):
+    """Return company_id of a course, or None."""
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute("SELECT company_id FROM courses WHERE id = ?", (course_id,))
+    row = cursor.fetchone()
+    connection.close()
+    return row[0] if row else None
+
 
 def get_course_by_id(course_id):
 
@@ -336,6 +484,20 @@ def get_company_materials(user_id):
 
     return materials
 
+
+def get_company_materials_by_company(company_id: int):
+    """Return all materials for a company (company-wide scope)."""
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute("""
+    SELECT file_name, content
+    FROM company_materials
+    WHERE company_id = ?
+    """, (company_id,))
+    materials = cursor.fetchall()
+    connection.close()
+    return materials
+
 def material_exists(user_id, file_name):
 
     connection = connect_db()
@@ -366,7 +528,7 @@ def delete_company_material(user_id, file_name):
     connection.commit()
     connection.close()
 
-def save_material_chunk(user_id, file_name, chunk_text, embedding):
+def save_material_chunk(user_id, file_name, chunk_text, embedding, company_id=None):
 
     connection = connect_db()
     cursor = connection.cursor()
@@ -376,16 +538,34 @@ def save_material_chunk(user_id, file_name, chunk_text, embedding):
         user_id,
         file_name,
         chunk_text,
-        embedding
+        embedding,
+        company_id
     )
-    VALUES (?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?)
     """, (
         user_id,
         file_name,
         chunk_text,
-        embedding
+        embedding,
+        company_id,
     ))
 
+    connection.commit()
+    connection.close()
+
+
+def set_material_company(user_id: int, file_name: str, company_id: int):
+    """Back-fill company_id on material and its chunks after upload."""
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute(
+        "UPDATE company_materials SET company_id = ? WHERE user_id = ? AND file_name = ?",
+        (company_id, user_id, file_name),
+    )
+    cursor.execute(
+        "UPDATE material_chunks SET company_id = ? WHERE user_id = ? AND file_name = ?",
+        (company_id, user_id, file_name),
+    )
     connection.commit()
     connection.close()
 
@@ -404,6 +584,20 @@ def get_material_chunks(user_id):
 
     connection.close()
 
+    return chunks
+
+
+def get_company_material_chunks(company_id: int):
+    """Return all chunks for a company (company-wide RAG)."""
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute("""
+    SELECT file_name, chunk_text, embedding
+    FROM material_chunks
+    WHERE company_id = ?
+    """, (company_id,))
+    chunks = cursor.fetchall()
+    connection.close()
     return chunks
 
 
@@ -469,20 +663,15 @@ def get_completed_modules(
 
     return [result[0] for result in results]
 
-def get_all_users():
-
+def get_all_users(company_id=None):
     connection = connect_db()
     cursor = connection.cursor()
-
-    cursor.execute("""
-    SELECT id, username
-    FROM users
-    """)
-
+    if company_id is not None:
+        cursor.execute("SELECT id, username, role FROM users WHERE company_id = ? ORDER BY id ASC", (company_id,))
+    else:
+        cursor.execute("SELECT id, username, role FROM users ORDER BY id ASC")
     users = cursor.fetchall()
-
     connection.close()
-
     return users
 
 def save_weak_topic(user_id, topic):
@@ -688,13 +877,13 @@ def hash_password(password):
 
 # ─── Course generation jobs ───────────────────────────────────────────────────
 
-def create_job(user_id):
+def create_job(user_id, company_id=None):
     connection = connect_db()
     cursor = connection.cursor()
     cursor.execute("""
-    INSERT INTO course_generation_jobs (user_id, status, created_at)
-    VALUES (?, 'pending', ?)
-    """, (user_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    INSERT INTO course_generation_jobs (user_id, status, company_id, created_at)
+    VALUES (?, 'pending', ?, ?)
+    """, (user_id, company_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     connection.commit()
     job_id = cursor.lastrowid
     connection.close()
@@ -830,6 +1019,213 @@ def get_api_usage_summary_by_user():
     LEFT JOIN users u ON u.id = a.user_id
     GROUP BY a.user_id ORDER BY cost DESC
     """)
+    rows = cursor.fetchall()
+    connection.close()
+    return rows
+
+
+# ─── Company helpers ──────────────────────────────────────────────────────────
+
+def create_company(name: str, owner_user_id: int, invite_code: str = None) -> int:
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute(
+        "INSERT INTO companies (name, owner_user_id, created_at, invite_code) VALUES (?, ?, ?, ?)",
+        (name, owner_user_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), invite_code),
+    )
+    connection.commit()
+    company_id = cursor.lastrowid
+    connection.close()
+    return company_id
+
+
+def get_company(company_id: int):
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute(
+        "SELECT id, name, owner_user_id, created_at FROM companies WHERE id = ?",
+        (company_id,),
+    )
+    row = cursor.fetchone()
+    connection.close()
+    return row
+
+
+def get_user_company(user_id: int):
+    """Return (company_id, company_name, role) for a user, or None."""
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute("""
+    SELECT c.id, c.name, u.role
+    FROM users u
+    LEFT JOIN companies c ON c.id = u.company_id
+    WHERE u.id = ?
+    """, (user_id,))
+    row = cursor.fetchone()
+    connection.close()
+    return row
+
+
+def get_company_users(company_id: int):
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute("""
+    SELECT id, username, role FROM users WHERE company_id = ? ORDER BY id ASC
+    """, (company_id,))
+    rows = cursor.fetchall()
+    connection.close()
+    return rows
+
+
+def set_user_company(user_id: int, company_id: int):
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute(
+        "UPDATE users SET company_id = ? WHERE id = ?",
+        (company_id, user_id),
+    )
+    connection.commit()
+    connection.close()
+
+
+def set_user_role(user_id: int, role: str):
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute(
+        "UPDATE users SET role = ? WHERE id = ?",
+        (role, user_id),
+    )
+    connection.commit()
+    connection.close()
+
+
+def get_user_role(user_id: int) -> str:
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute("SELECT role FROM users WHERE id = ?", (user_id,))
+    row = cursor.fetchone()
+    connection.close()
+    return row[0] if row else "employee"
+
+
+# ─── Invite code helpers ──────────────────────────────────────────────────────
+
+def _generate_invite_code_value() -> str:
+    """Generate a short, readable 8-char invite code like ABCD-1234."""
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    part1 = "".join(secrets.choice(alphabet) for _ in range(4))
+    part2 = "".join(secrets.choice(alphabet) for _ in range(4))
+    return f"{part1}-{part2}"
+
+
+def generate_invite_code() -> str:
+    return _generate_invite_code_value()
+
+
+def get_company_by_invite_code(invite_code: str):
+    """Return (id, name, owner_user_id) for a company matching invite_code, or None."""
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute(
+        "SELECT id, name, owner_user_id FROM companies WHERE invite_code = ?",
+        (invite_code.strip().upper(),),
+    )
+    row = cursor.fetchone()
+    connection.close()
+    return row
+
+
+def get_company_invite_code(company_id: int):
+    """Return invite_code for a company, or None."""
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute("SELECT invite_code FROM companies WHERE id = ?", (company_id,))
+    row = cursor.fetchone()
+    connection.close()
+    return row[0] if row else None
+
+
+def set_company_invite_code(company_id: int, invite_code: str):
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute(
+        "UPDATE companies SET invite_code = ? WHERE id = ?",
+        (invite_code, company_id),
+    )
+    connection.commit()
+    connection.close()
+
+
+def regenerate_company_invite_code(company_id: int) -> str:
+    """Generate a fresh unique invite code for a company and persist it."""
+    connection = connect_db()
+    cursor = connection.cursor()
+    while True:
+        code = _generate_invite_code_value()
+        cursor.execute(
+            "SELECT id FROM companies WHERE invite_code = ? AND id != ?",
+            (code, company_id),
+        )
+        if not cursor.fetchone():
+            break
+    cursor.execute(
+        "UPDATE companies SET invite_code = ? WHERE id = ?",
+        (code, company_id),
+    )
+    connection.commit()
+    connection.close()
+    return code
+
+
+# ─── End invite code helpers ──────────────────────────────────────────────────
+
+def get_company_id_for_user(user_id: int):
+    """Return company_id for a user, or None."""
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute("SELECT company_id FROM users WHERE id = ?", (user_id,))
+    row = cursor.fetchone()
+    connection.close()
+    return row[0] if row else None
+
+
+def get_api_usage_summary_by_operation_for_company(company_id: int):
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute("""
+    SELECT operation_type, COUNT(*) as calls, SUM(total_tokens) as tokens,
+           SUM(estimated_cost_usd) as cost, SUM(duration_minutes) as total_minutes
+    FROM api_usage WHERE company_id = ?
+    GROUP BY operation_type ORDER BY cost DESC
+    """, (company_id,))
+    rows = cursor.fetchall()
+    connection.close()
+    return rows
+
+
+def get_total_api_usage_for_company(company_id: int):
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute("""
+    SELECT SUM(total_tokens), SUM(estimated_cost_usd)
+    FROM api_usage WHERE company_id = ?
+    """, (company_id,))
+    row = cursor.fetchone()
+    connection.close()
+    return row
+
+
+def get_api_usage_summary_by_user_for_company(company_id: int):
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute("""
+    SELECT u.username, a.user_id, COUNT(*) as calls,
+           SUM(a.total_tokens) as tokens, SUM(a.estimated_cost_usd) as cost
+    FROM api_usage a
+    LEFT JOIN users u ON u.id = a.user_id
+    WHERE a.company_id = ?
+    GROUP BY a.user_id ORDER BY cost DESC
+    """, (company_id,))
     rows = cursor.fetchall()
     connection.close()
     return rows
