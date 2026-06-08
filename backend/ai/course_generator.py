@@ -375,13 +375,54 @@ def generate_course_module(client, file_content, module_plan):
 
     return response.output_text
 
+def _max_test_questions(module_count: int) -> int:
+    """Target upper bound for test questions based on module count."""
+    if module_count <= 5:
+        return 12
+    if module_count <= 10:
+        return 20
+    if module_count <= 20:
+        return 30
+    return 40
+
+
+def _trim_tests_evenly(tests: list, max_q: int) -> list:
+    """Trim test list to max_q, keeping even coverage across topics."""
+    if len(tests) <= max_q:
+        return tests
+
+    # Group by topic field
+    from collections import defaultdict
+    by_topic = defaultdict(list)
+    for q in tests:
+        by_topic[q.get("topic", "")].append(q)
+
+    result = []
+    topics = list(by_topic.keys())
+    # Round-robin across topics until we hit the limit
+    i = 0
+    while len(result) < max_q:
+        topic = topics[i % len(topics)]
+        if by_topic[topic]:
+            result.append(by_topic[topic].pop(0))
+        i += 1
+        # Stop if all topics exhausted
+        if all(not v for v in by_topic.values()):
+            break
+    return result
+
+
 def generate_course_tests(client, modules, user_id=None, job_id=None):
 
-    modules_text = ""
+    module_count = len(modules)
+    max_questions = _max_test_questions(module_count)
+    # Ask for a few more than the max so the LLM has room to distribute;
+    # post-processing will trim the excess.
+    target = max_questions + 5
 
+    modules_text = ""
     for module in modules:
         modules_text += f"""
-
 Модуль: {module["title"]}
 
 Описание:
@@ -403,20 +444,25 @@ def generate_course_tests(client, modules, user_id=None, job_id=None):
         input=f"""
 Ты — AI-методист корпоративного обучения.
 
-Создай тест по обучающему курсу.
+Создай тест по обучающему курсу из {module_count} модулей.
 
-ВАЖНО:
-- вопросы должны проверять понимание материала
+КОЛИЧЕСТВО ВОПРОСОВ:
+- Создай ровно {target} вопросов — не больше, не меньше.
+- Не создавай одинаковое количество вопросов для каждого модуля.
+- Распределяй вопросы по важности тем: важные и сложные модули получают 2–3 вопроса, простые — 1 вопрос.
+- Главная цель — проверить понимание всего курса без перегрузки пользователя.
+
+ТРЕБОВАНИЯ К ВОПРОСАМ:
+- вопросы должны проверять понимание материала, а не запоминание фраз
 - не задавай слишком простые вопросы
-- не используй внешние знания
-- используй только содержание модулей
+- не используй внешние знания — только содержание модулей
 - варианты ответов должны быть реалистичными
 - правильный ответ должен точно совпадать с одним из вариантов
+- вопросы должны покрывать все ключевые темы курса
 
-Требования:
-- минимум 5 вопросов на каждый модуль
-- вопросы должны покрывать все модули курса
-- вопросы должны проверять не запоминание фраз, а понимание
+ПОКРЫТИЕ:
+- каждая ключевая тема курса должна быть проверена хотя бы одним вопросом
+- вспомогательные и вводные модули можно пропустить, если тема очевидна
 
 Верни JSON строго по структуре:
 
@@ -434,7 +480,7 @@ def generate_course_tests(client, modules, user_id=None, job_id=None):
 Курс:
 
 {modules_text}
-"""
+""",
     )
 
     if user_id is not None:
@@ -443,8 +489,12 @@ def generate_course_tests(client, modules, user_id=None, job_id=None):
 
     raw_text = response.output_text
     test_data = json.loads(raw_text)
+    tests = test_data["test"]
 
-    return test_data["test"]
+    # Post-processing: enforce hard cap with even topic distribution
+    tests = _trim_tests_evenly(tests, max_questions)
+
+    return tests
 
 def generate_module_tests(client, module):
 
