@@ -85,7 +85,7 @@ def record_transcription_usage(
     related_job_id=None,
     related_course_id=None,
 ):
-    """Save transcription usage. Duration may be unknown (0) — cost will be 0 with TODO note."""
+    """Save transcription usage with real duration and estimated cost. Never raises."""
     try:
         cost = estimate_transcription_cost(model, duration_minutes)
         save_api_usage(
@@ -96,6 +96,7 @@ def record_transcription_usage(
             output_tokens=0,
             total_tokens=0,
             estimated_cost_usd=cost,
+            duration_minutes=duration_minutes,
             related_job_id=related_job_id,
             related_course_id=related_course_id,
         )

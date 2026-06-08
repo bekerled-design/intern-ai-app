@@ -61,6 +61,7 @@ from ai.recommendations import generate_recommendations
 from utils.text_search import split_text_into_chunks
 from utils.file_loader import read_uploaded_file
 from utils.usage_tracker import record_transcription_usage
+from utils.media_duration import get_media_duration_minutes
 
 # Load .env from backend dir first, then from project root as fallback
 load_dotenv()
@@ -206,8 +207,8 @@ async def upload_material(
                     response_format="text",
                 )
             content = str(transcript)
-            # TODO: extract actual duration for accurate cost estimate
-            record_transcription_usage(user_id, "whisper-1", duration_minutes=0.0)
+            duration_minutes = get_media_duration_minutes(tmp_path)
+            record_transcription_usage(user_id, "whisper-1", duration_minutes=duration_minutes)
         except Exception as e:
             content = f"Ошибка транскрипции: {e}"
         finally:
@@ -491,7 +492,8 @@ def admin_generate_retraining(target_id: int, user_id: int = Depends(get_current
 def admin_usage(user_id: int = Depends(get_current_user)):
     total_tokens, total_cost = get_total_api_usage()
     by_op = [
-        {"operation": r[0], "calls": r[1], "tokens": r[2], "cost": round(r[3] or 0, 6)}
+        {"operation": r[0], "calls": r[1], "tokens": r[2], "cost": round(r[3] or 0, 6),
+         "duration_minutes": round(r[4] or 0, 4)}
         for r in get_api_usage_summary_by_operation()
     ]
     by_user = [

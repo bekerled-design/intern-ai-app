@@ -1,11 +1,9 @@
 import tempfile
 import os
 
-from utils.usage_tracker import record_transcription_usage
-
 
 def transcribe_video(client, uploaded_file, user_id=None):
-
+    """Transcribe audio/video file. Usage tracking is handled by the caller (upload endpoint)."""
     uploaded_file.seek(0)
 
     file_bytes = uploaded_file.read()
@@ -23,10 +21,6 @@ def transcribe_video(client, uploaded_file, user_id=None):
                 file=audio_file,
                 response_format="text"
             )
-
-        if user_id is not None:
-            # TODO: extract actual duration from file for accurate cost estimate
-            record_transcription_usage(user_id, "whisper-1", duration_minutes=0.0)
 
         return str(transcript)
 

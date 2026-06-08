@@ -129,11 +129,18 @@ CREATE TABLE IF NOT EXISTS api_usage (
     output_tokens INTEGER DEFAULT 0,
     total_tokens INTEGER DEFAULT 0,
     estimated_cost_usd REAL DEFAULT 0,
+    duration_minutes REAL DEFAULT 0,
     related_job_id INTEGER,
     related_course_id INTEGER,
     created_at TEXT
 )
 """)
+    # Safe migration for existing databases — no-op if column already exists.
+    try:
+        cursor.execute("ALTER TABLE api_usage ADD COLUMN duration_minutes REAL DEFAULT 0")
+        connection.commit()
+    except Exception:
+        pass
 
     connection.commit()
     connection.close()
@@ -760,15 +767,17 @@ def get_last_done_job(user_id):
 # ─── API Usage tracking ───────────────────────────────────────────────────────
 
 def save_api_usage(user_id, operation_type, model, input_tokens, output_tokens,
-                   total_tokens, estimated_cost_usd, related_job_id=None, related_course_id=None):
+                   total_tokens, estimated_cost_usd, duration_minutes=0.0,
+                   related_job_id=None, related_course_id=None):
     connection = connect_db()
     cursor = connection.cursor()
     cursor.execute("""
     INSERT INTO api_usage (user_id, operation_type, model, input_tokens, output_tokens,
-        total_tokens, estimated_cost_usd, related_job_id, related_course_id, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        total_tokens, estimated_cost_usd, duration_minutes, related_job_id, related_course_id, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (user_id, operation_type, model, input_tokens, output_tokens,
-          total_tokens, estimated_cost_usd, related_job_id, related_course_id,
+          total_tokens, estimated_cost_usd, duration_minutes or 0.0,
+          related_job_id, related_course_id,
           datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     connection.commit()
     connection.close()
@@ -803,7 +812,7 @@ def get_api_usage_summary_by_operation():
     cursor = connection.cursor()
     cursor.execute("""
     SELECT operation_type, COUNT(*) as calls, SUM(total_tokens) as tokens,
-           SUM(estimated_cost_usd) as cost
+           SUM(estimated_cost_usd) as cost, SUM(duration_minutes) as total_minutes
     FROM api_usage GROUP BY operation_type ORDER BY cost DESC
     """)
     rows = cursor.fetchall()
