@@ -20,7 +20,7 @@ def ask_ai_mentor(client, user_id, company_material, course_data, user_question)
         user_question,
         question_embedding,
         chunks,
-        limit=5,
+        limit=8,
     )
 
     # Confidence gate: check if the best match is relevant enough
@@ -33,56 +33,31 @@ def ask_ai_mentor(client, user_id, company_material, course_data, user_question)
 
     context = ""
     for score, semantic_score, keyword_points, file_name, chunk_text in similar_chunks:
-        context += f"""
-Источник файла: {file_name}
-
-{chunk_text}
-
----
-"""
+        context += f"Источник: {file_name}\n\n{chunk_text}\n\n---\n"
 
     history = get_ai_chat_history(user_id)
     history_text = ""
-    for question, answer in history[-5:]:
-        history_text += f"""
-Вопрос стажёра:
-{question}
-
-Ответ AI:
-{answer}
-
-"""
+    for question, answer in history[-3:]:
+        history_text += f"Вопрос: {question}\nОтвет: {answer}\n\n"
 
     response = client.responses.create(
         model="gpt-4.1-mini",
-        input=f"""
-Ты — AI-наставник компании.
+        input=f"""Ты — AI-наставник компании.
 
-Отвечай ТОЛЬКО на основе предоставленного контекста.
+Отвечай ТОЛЬКО на основе предоставленных фрагментов материалов.
 
 КРИТИЧЕСКИ ВАЖНО:
-- Отвечай только если контекст ПРЯМО содержит ответ на вопрос.
-- Если контекст похож по общей теме, но не содержит точного ответа — скажи: "В материалах нет точной информации по этому вопросу."
+- Отвечай только если фрагменты ПРЯМО содержат ответ.
+- Если информация не найдена — скажи: "В материалах нет точной информации по этому вопросу."
 - Не делай выводы из смежных тем.
-- Не заменяй отсутствующий ответ общими рекомендациями.
-- Не используй свои знания вне контекста.
-- Не придумывай информацию.
-- Лучше честно сказать "информации нет", чем дать нерелевантный ответ.
-- Если найдено несколько источников — объедини информацию.
-- Если в контексте есть точный ответ — обязательно используй его.
-- Указывай, на каком фрагменте или документе основан ответ.
+- Не используй знания вне контекста.
+- Указывай источник ответа.
 
-История прошлых вопросов стажёра:
+История последних вопросов:
 {history_text}
-
-Найденные фрагменты материалов:
+Найденные фрагменты:
 {context}
-
-Учебный курс:
-{json.dumps(course_data, ensure_ascii=False)}
-
-Вопрос стажёра:
-{user_question}
+Вопрос стажёра: {user_question}
 """,
     )
 

@@ -22,7 +22,7 @@ def split_material_into_parts(text, chunk_size=10000, overlap=1000):
 
     # Use heading-based split only if we find at least 2 headings
     if len(matches) >= 2:
-        parts = []
+        raw_parts = []
         for i, match in enumerate(matches):
             start = match.start()
             end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
@@ -32,9 +32,29 @@ def split_material_into_parts(text, chunk_size=10000, overlap=1000):
             # If a single section is very large, split it further
             if len(part) > chunk_size:
                 sub_parts = split_text_into_chunks(part, chunk_size=chunk_size, overlap=overlap)
-                parts.extend(sub_parts)
+                raw_parts.extend(sub_parts)
             else:
-                parts.append(part)
+                raw_parts.append(part)
+
+        # Merge small sections so each part is at least 1500 chars.
+        # This prevents 8 × 300-char sections that each spawn 2-3 modules.
+        _MIN_PART = 1500
+        parts = []
+        buf = ""
+        for p in raw_parts:
+            if buf:
+                buf += "\n\n" + p
+            else:
+                buf = p
+            if len(buf) >= _MIN_PART:
+                parts.append(buf)
+                buf = ""
+        if buf:
+            if parts:
+                parts[-1] += "\n\n" + buf
+            else:
+                parts.append(buf)
+
         if parts:
             return parts
 
@@ -543,51 +563,28 @@ def generate_part_modules(client, part_text, part_number, user_id=None, job_id=N
 
 Создай обучающие модули только по этой части материала.
 
-ШАГ 1 — ПЕРЕД СОЗДАНИЕМ МОДУЛЕЙ:
-Мысленно составь список ВСЕХ самостоятельных тем в этой части.
-Каждый смысловой блок, раздел, инструмент, процесс или регламент — отдельная тема.
-Каждая тема должна стать отдельным модулем.
-
-КОЛИЧЕСТВО МОДУЛЕЙ:
-- обычно 2–5 модулей по одной части
-- если часть маленькая или содержит одну тему — 1 модуль
-- если часть содержит много отдельных тем (заголовки, разделы, шаги) — до 7 модулей
-- ЗАПРЕЩЕНО создавать один обзорный модуль вместо нескольких конкретных
-- ЗАПРЕЩЕНО объединять разные продуктовые, процессные или технические темы в один модуль
-- если материал содержит несколько явно разных тем — каждая тема отдельный модуль
+КОЛИЧЕСТВО МОДУЛЕЙ — главное правило:
+- Обычно 2–4 модуля на одну часть.
+- Максимум 6 модулей, даже если тем много.
+- Минимум 1 модуль, если часть маленькая или содержит одну тему.
+- Объединяй близкие подтемы в один логичный модуль.
+- Не создавай отдельный модуль на каждый факт, правило или пункт списка.
+- Один модуль = самостоятельный учебный блок (процесс, инструмент, принцип), а не отдельный абзац.
+- Если часть содержит перечень мелких правил — объедини их в один модуль "Правила и стандарты X".
 
 ВАЖНО:
-- используй только эту часть материала
-- не используй внешние знания
-- не придумывай темы
-- не делай краткий пересказ
-- раскрывай темы подробно
-- каждый модуль должен быть полноценным уроком, а не кратким описанием
-- каждый модуль должен содержать несколько подробных абзацев
-- не ограничивайся списком тезисов
-- объясняй материал как преподаватель
-- раскрывай причинно-следственные связи
-- добавляй пошаговые инструкции, если они есть в материале
-- добавляй практические примеры, если они следуют из материала
-- сохраняй конкретные названия сервисов, инструментов и методик из материала
-- если в материале есть цифры, примеры, кейсы или последовательности действий — обязательно включай их в урок
+- Используй только эту часть материала.
+- Не используй внешние знания.
+- Не придумывай темы.
+- Раскрывай каждый модуль подробно — объясняй как преподаватель, а не как конспект.
+- Сохраняй конкретные названия, цифры, примеры из материала.
 
-Каждый модуль в поле content должен иметь структуру:
-
+Каждый модуль в поле content должен содержать:
 1. Введение
-2. Подробное объяснение темы
+2. Подробное объяснение
 3. Как применять на практике
-4. Пример из материала или практическая ситуация
-5. Типичные ошибки
-6. Краткий вывод
-
-Не пиши короткий конспект. Пиши как полноценный урок для новичка.
-
-Минимальный размер content:
-- не менее 800 слов для важной темы
-- не менее 500 слов для небольшой темы
-
-Если информации достаточно, пиши максимально подробно.
+4. Типичные ошибки
+5. Краткий вывод
 
 Верни JSON:
 
@@ -596,7 +593,7 @@ def generate_part_modules(client, part_text, part_number, user_id=None, job_id=N
         {{
             "title": "Название модуля",
             "description": "Краткое описание",
-            "content": "Полноценный обучающий материал со структурой: введение, подробное объяснение, пошаговая инструкция, примеры, типичные ошибки, вывод"
+            "content": "Полноценный обучающий материал"
         }}
     ]
 }}
@@ -622,16 +619,14 @@ def generate_course_by_parts(client, file_content, progress_callback=None, user_
     parts = split_material_into_parts(file_content, chunk_size=10000, overlap=1000)
     total = len(parts)
 
-    print(f"[DIAG] Материал: {char_count} символов, {word_count} слов, частей: {total}")
-    print(f"[DIAG] Первые 300 символов: {file_content[:300]!r}")
-    print(f"[DIAG] Последние 300 символов: {file_content[-300:]!r}")
-    if char_count < 15000:
-        print(f"[DIAG] WARNING: material_text is unexpectedly short ({char_count} chars) for long source material")
+    import sys
+    diag = f"[DIAG] chars={char_count} words={word_count} parts={total}"
+    print(diag.encode(sys.stdout.encoding or "utf-8", errors="replace").decode(sys.stdout.encoding or "utf-8"))
 
     all_modules = []
 
     for index, part in enumerate(parts):
-        print(f"Обрабатываю часть {index + 1} из {total}")
+        print(f"[GEN] part {index + 1}/{total}")
         if progress_callback:
             progress_callback(index, total)
         part_modules = generate_part_modules(
@@ -645,6 +640,9 @@ def generate_course_by_parts(client, file_content, progress_callback=None, user_
 
     if progress_callback:
         progress_callback(total, total)
+
+    if char_count < 30000 and len(all_modules) > 40:
+        print(f"[WARNING] too many modules ({len(all_modules)}) for material size ({char_count} chars)")
 
     tests = generate_course_tests(
         client,

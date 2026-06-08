@@ -60,6 +60,7 @@ from ai.retraining_generator import generate_retraining_course
 from ai.recommendations import generate_recommendations
 from utils.text_search import split_text_into_chunks
 from utils.file_loader import read_uploaded_file
+from utils.usage_tracker import record_transcription_usage
 
 # Load .env from backend dir first, then from project root as fallback
 load_dotenv()
@@ -205,6 +206,8 @@ async def upload_material(
                     response_format="text",
                 )
             content = str(transcript)
+            # TODO: extract actual duration for accurate cost estimate
+            record_transcription_usage(user_id, "whisper-1", duration_minutes=0.0)
         except Exception as e:
             content = f"Ошибка транскрипции: {e}"
         finally:
