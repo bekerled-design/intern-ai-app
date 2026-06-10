@@ -279,6 +279,51 @@ CREATE TABLE IF NOT EXISTS api_usage (
     if companies_without_code:
         connection.commit()
 
+    # ── course_assignments table ──────────────────────────────────────────────
+    cursor.execute("""
+CREATE TABLE IF NOT EXISTS course_assignments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    course_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    company_id INTEGER NOT NULL,
+    assigned_by_user_id INTEGER,
+    created_at TEXT,
+    UNIQUE(course_id, user_id)
+)
+""")
+    connection.commit()
+
+    # ── Seed: backfill assignments for existing courses (creator only) ────────
+    cursor.execute("""
+        SELECT c.id, c.user_id, c.company_id
+        FROM courses c
+        WHERE c.user_id IS NOT NULL
+          AND c.company_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM course_assignments ca
+              WHERE ca.course_id = c.id AND ca.user_id = c.user_id
+          )
+    """)
+    missing = cursor.fetchall()
+    seeded = 0
+    skipped = 0
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for (cid, uid, cmp_id) in missing:
+        if not uid or not cmp_id:
+            skipped += 1
+            print(f"[seed assignments] skip course {cid}: user_id={uid} company_id={cmp_id}")
+            continue
+        cursor.execute(
+            """INSERT OR IGNORE INTO course_assignments
+               (course_id, user_id, company_id, assigned_by_user_id, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (cid, uid, cmp_id, uid, now),
+        )
+        seeded += 1
+    if seeded or skipped:
+        connection.commit()
+        print(f"[seed assignments] processed={len(missing)} seeded={seeded} skipped={skipped}")
+
     connection.close()
 
 def save_test_result(user_id, score):
@@ -957,17 +1002,18 @@ def get_last_done_job(user_id):
 
 def save_api_usage(user_id, operation_type, model, input_tokens, output_tokens,
                    total_tokens, estimated_cost_usd, duration_minutes=0.0,
-                   related_job_id=None, related_course_id=None):
+                   related_job_id=None, related_course_id=None, company_id=None):
     connection = connect_db()
     cursor = connection.cursor()
     cursor.execute("""
     INSERT INTO api_usage (user_id, operation_type, model, input_tokens, output_tokens,
-        total_tokens, estimated_cost_usd, duration_minutes, related_job_id, related_course_id, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        total_tokens, estimated_cost_usd, duration_minutes, related_job_id, related_course_id, created_at, company_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (user_id, operation_type, model, input_tokens, output_tokens,
           total_tokens, estimated_cost_usd, duration_minutes or 0.0,
           related_job_id, related_course_id,
-          datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+          datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+          company_id))
     connection.commit()
     connection.close()
 
@@ -1229,3 +1275,75 @@ def get_api_usage_summary_by_user_for_company(company_id: int):
     rows = cursor.fetchall()
     connection.close()
     return rows
+
+
+# ─── Course assignments ───────────────────────────────────────────────────────
+
+def assign_course_to_user(course_id: int, user_id: int, company_id: int, assigned_by_user_id: int = None):
+    connection = connect_db()
+    cursor = connection.cursor()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute(
+        """INSERT OR IGNORE INTO course_assignments
+           (course_id, user_id, company_id, assigned_by_user_id, created_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (course_id, user_id, company_id, assigned_by_user_id, now),
+    )
+    connection.commit()
+    connection.close()
+
+
+def unassign_course_from_user(course_id: int, user_id: int, company_id: int):
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute(
+        "DELETE FROM course_assignments WHERE course_id = ? AND user_id = ? AND company_id = ?",
+        (course_id, user_id, company_id),
+    )
+    connection.commit()
+    connection.close()
+
+
+def get_course_assignments(course_id: int, company_id: int):
+    """Return list of user_ids assigned to a course within a company."""
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute(
+        "SELECT user_id FROM course_assignments WHERE course_id = ? AND company_id = ?",
+        (course_id, company_id),
+    )
+    rows = cursor.fetchall()
+    connection.close()
+    return [r[0] for r in rows]
+
+
+def get_assigned_courses_for_user(user_id: int, company_id: int):
+    """Return list of course_ids assigned to a user within a company."""
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute(
+        "SELECT course_id FROM course_assignments WHERE user_id = ? AND company_id = ?",
+        (user_id, company_id),
+    )
+    rows = cursor.fetchall()
+    connection.close()
+    return [r[0] for r in rows]
+
+
+def user_has_course_access(user_id: int, course_id: int) -> bool:
+    """True if user created the course OR is assigned to it."""
+    connection = connect_db()
+    cursor = connection.cursor()
+    # Created by user
+    cursor.execute("SELECT id FROM courses WHERE id = ? AND user_id = ?", (course_id, user_id))
+    if cursor.fetchone():
+        connection.close()
+        return True
+    # Assigned
+    cursor.execute(
+        "SELECT id FROM course_assignments WHERE course_id = ? AND user_id = ?",
+        (course_id, user_id),
+    )
+    result = cursor.fetchone() is not None
+    connection.close()
+    return result

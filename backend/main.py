@@ -70,8 +70,19 @@ from database.database import (
     get_company_invite_code,
     regenerate_company_invite_code,
     generate_invite_code,
+    # course assignments
+    assign_course_to_user,
+    unassign_course_from_user,
+    get_course_assignments,
+    get_assigned_courses_for_user,
+    user_has_course_access,
 )
-from ai.course_generator import generate_course_by_parts, split_material_into_parts
+from ai.course_generator import (
+    generate_course_by_parts,
+    split_material_into_parts,
+    analyze_training_programs,
+    generate_course_for_program,
+)
 from ai.mentor_chat import ask_ai_mentor
 from ai.embeddings import create_embedding
 from ai.weakness_analyzer import analyze_weaknesses
@@ -236,23 +247,14 @@ async def upload_material(
     file: UploadFile = File(...),
     user_id: int = Depends(get_current_user),
 ):
-    class _FakeUpload:
-        def __init__(self, name, data):
-            self.name = name
-            self._data = data
-
-        def read(self):
-            return self._data
-
-        def seek(self, pos):
-            pass
+    import tempfile
+    import os as _os
 
     raw = await file.read()
-    fake = _FakeUpload(file.filename, raw)
-
     name_lower = file.filename.lower()
+    company_id = get_company_id_for_user(user_id)
+
     if name_lower.endswith((".mp4", ".mp3", ".wav", ".m4a", ".webm")):
-        import tempfile, os as _os
         suffix = "." + name_lower.rsplit(".", 1)[-1]
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp.write(raw)
@@ -266,24 +268,31 @@ async def upload_material(
                 )
             content = str(transcript)
             duration_minutes = get_media_duration_minutes(tmp_path)
-            record_transcription_usage(user_id, "whisper-1", duration_minutes=duration_minutes)
+            record_transcription_usage(user_id, "whisper-1", duration_minutes=duration_minutes,
+                                       company_id=company_id)
         except Exception as e:
             content = f"Ошибка транскрипции: {e}"
         finally:
             if _os.path.exists(tmp_path):
                 _os.remove(tmp_path)
     else:
-        content = read_uploaded_file(fake)
+        class _FakeUpload:
+            def __init__(self, name, data):
+                self.name = name
+                self._data = data
+            def read(self):
+                return self._data
+
+        content = read_uploaded_file(_FakeUpload(file.filename, raw))
 
     if not material_exists(user_id, file.filename):
         save_company_material(user_id, file.filename, content)
-        company_id = get_company_id_for_user(user_id)
         if company_id:
             set_material_company(user_id, file.filename, company_id)
         chunks = split_material_into_parts(content[:500_000], chunk_size=2000, overlap=200)
         for chunk in chunks:
             try:
-                emb = create_embedding(client, chunk, user_id=user_id)
+                emb = create_embedding(client, chunk, user_id=user_id, company_id=company_id)
                 save_material_chunk(user_id, file.filename, chunk, emb)
             except Exception:
                 continue
@@ -311,8 +320,12 @@ def _run_generation_job(job_id: int, user_id: int, material: str, company_id=Non
                 update_job_status(job_id, "running", progress_done=done, progress_total=total)
 
         course_data = generate_course_by_parts(client, material, progress_callback,
-                                               user_id=user_id, job_id=job_id)
+                                               user_id=user_id, job_id=job_id,
+                                               company_id=company_id)
         course_id = save_course(user_id, course_data, company_id=company_id)
+        # Автоматически назначаем курс создателю
+        if company_id:
+            assign_course_to_user(course_id, user_id, company_id, assigned_by_user_id=user_id)
         add_activity(user_id, f"Сгенерировал курс: {course_data.get('course_title', '')}")
         update_job_status(job_id, "done", course_id=course_id,
                           progress_done=0, progress_total=0)
@@ -376,6 +389,133 @@ def get_active_generation_job(user_id: int = Depends(get_current_user)):
     }}
 
 
+# ─── Pre-generation analysis ─────────────────────────────────────────────────
+
+class AnalyzeMaterialsRequest(BaseModel):
+    program_index: Optional[int] = None  # для generate-multi: индекс программы из analyze
+
+
+@app.post("/courses/analyze-materials")
+def analyze_materials(user_id: int = Depends(get_current_user)):
+    """
+    Analyse loaded company materials and suggest how many courses to create.
+    Does NOT start generation — returns a plan only.
+    """
+    company_id = get_company_id_for_user(user_id)
+    if company_id is not None:
+        raw_materials = get_company_materials_by_company(company_id)
+    else:
+        raw_materials = get_company_materials(user_id)
+
+    if not raw_materials:
+        raise HTTPException(status_code=400, detail="Нет загруженных материалов")
+
+    materials = [{"file_name": m[0], "content": m[1]} for m in raw_materials]
+    result = analyze_training_programs(client, materials, user_id=user_id, company_id=company_id)
+    return result
+
+
+# ─── Multi-course generation (job-based) ──────────────────────────────────────
+
+class GenerateMultiRequest(BaseModel):
+    programs: list[dict]  # список program-объектов из /courses/analyze-materials
+
+
+def _run_multi_generation_job(
+    job_id: int,
+    user_id: int,
+    all_materials: list[dict],
+    programs: list[dict],
+    company_id=None,
+):
+    """Runs in thread pool. Generates one course per program, updates job progress."""
+    try:
+        update_job_status(job_id, "running")
+        total_programs = len(programs)
+        created_course_ids = []
+
+        for idx, program in enumerate(programs):
+            def progress_callback(done, total, _idx=idx, _total=total_programs):
+                # Map local progress to overall: each program = equal share
+                overall_done = _idx * 100 + (done * 100 // max(total, 1))
+                overall_total = _total * 100
+                update_job_status(job_id, "running",
+                                  progress_done=overall_done,
+                                  progress_total=overall_total)
+
+            # Status label via error field (non-fatal; overwritten on success)
+            update_job_status(
+                job_id, "running",
+                error=f"Генерируется курс {idx + 1} из {total_programs}: {program.get('course_title', '')}",
+                progress_done=idx * 100,
+                progress_total=total_programs * 100,
+            )
+
+            course_data = generate_course_for_program(
+                client,
+                all_materials,
+                program,
+                progress_callback=progress_callback,
+                user_id=user_id,
+                job_id=job_id,
+                course_index=idx,
+                total_courses=total_programs,
+                company_id=company_id,
+            )
+            course_id = save_course(user_id, course_data, company_id=company_id)
+            if company_id:
+                assign_course_to_user(course_id, user_id, company_id, assigned_by_user_id=user_id)
+            add_activity(user_id, f"Сгенерировал курс: {course_data.get('course_title', '')}")
+            created_course_ids.append(course_id)
+
+        # Store last course_id so frontend can open it; full list in error field
+        last_id = created_course_ids[-1] if created_course_ids else None
+        update_job_status(
+            job_id, "done",
+            course_id=last_id,
+            error=None,
+            progress_done=0,
+            progress_total=0,
+        )
+    except Exception as e:
+        update_job_status(job_id, "error", error=str(e))
+
+
+@app.post("/courses/generate-multi")
+async def start_multi_generation(
+    body: GenerateMultiRequest,
+    user_id: int = Depends(get_current_user),
+):
+    """Start parallel multi-course generation based on analyze-materials plan."""
+    if not body.programs:
+        raise HTTPException(status_code=400, detail="Нет программ для генерации")
+
+    active = get_active_job(user_id)
+    if active:
+        return {"job_id": active[0]}
+
+    company_id = get_company_id_for_user(user_id)
+    if company_id is not None:
+        raw_materials = get_company_materials_by_company(company_id)
+    else:
+        raw_materials = get_company_materials(user_id)
+
+    if not raw_materials:
+        raise HTTPException(status_code=400, detail="Нет загруженных материалов")
+
+    all_materials = [{"file_name": m[0], "content": m[1]} for m in raw_materials]
+    job_id = create_job(user_id, company_id=company_id)
+
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(
+        None,
+        _run_multi_generation_job,
+        job_id, user_id, all_materials, body.programs, company_id,
+    )
+
+    return {"job_id": job_id}
+
+
 # ─── Courses CRUD ─────────────────────────────────────────────────────────────
 
 @app.get("/courses")
@@ -399,9 +539,43 @@ def list_courses(user_id: int = Depends(get_current_user)):
 
 @app.get("/users/{target_user_id}/courses")
 def list_user_courses(target_user_id: int, user_id: int = Depends(get_current_user)):
-    courses = get_user_courses(target_user_id)
+    requester_row = get_user_company(user_id)
+    requester_role = requester_row[2] if requester_row else "employee"
+    requester_company = requester_row[0] if requester_row else None
+
+    if requester_role in ("owner", "admin"):
+        # owner/admin видит все курсы компании
+        from database.database import connect_db as _cdb
+        _conn = _cdb()
+        _cur = _conn.cursor()
+        _cur.execute(
+            "SELECT id, course_title, due_date FROM courses WHERE company_id = ? ORDER BY id DESC",
+            (requester_company,),
+        )
+        courses_raw = _cur.fetchall()
+        _conn.close()
+    else:
+        # employee — только свои + назначенные
+        own = get_user_courses(target_user_id)
+        own_ids = {c[0] for c in own}
+        assigned_ids = set(get_assigned_courses_for_user(target_user_id, requester_company)) if requester_company else set()
+        all_ids = own_ids | assigned_ids
+        courses_raw = [c for c in own if c[0] in all_ids]
+        # добавляем назначенные, которых нет в own
+        extra_ids = assigned_ids - own_ids
+        if extra_ids:
+            from database.database import connect_db as _cdb
+            _conn = _cdb()
+            _cur = _conn.cursor()
+            for cid in extra_ids:
+                _cur.execute("SELECT id, course_title, due_date FROM courses WHERE id = ?", (cid,))
+                row = _cur.fetchone()
+                if row:
+                    courses_raw.append(row)
+            _conn.close()
+
     result = []
-    for c in courses:
+    for c in courses_raw:
         course_id = c[0]
         content = get_course_by_id(course_id)
         total = 0
@@ -421,13 +595,16 @@ def get_course(course_id: int, user_id: int = Depends(get_current_user)):
     row = get_course_by_id(course_id)
     if not row:
         raise HTTPException(status_code=404, detail="Курс не найден")
-    # Company isolation: course must belong to the same company as the requester.
-    # Courses with NULL company_id (legacy) are accessible to any authenticated user.
     course_company = get_course_company_id(course_id)
     if course_company is not None:
         requester_company = get_company_id_for_user(user_id)
         if requester_company != course_company:
             raise HTTPException(status_code=403, detail="Нет доступа к этому курсу")
+        # Employee must be assigned or be the creator
+        requester_row = get_user_company(user_id)
+        requester_role = requester_row[2] if requester_row else "employee"
+        if requester_role == "employee" and not user_has_course_access(user_id, course_id):
+            raise HTTPException(status_code=403, detail="Курс не назначен")
     return json.loads(row[0])
 
 
@@ -435,6 +612,55 @@ def get_course(course_id: int, user_id: int = Depends(get_current_user)):
 def remove_course(course_id: int, user_id: int = Depends(get_current_user)):
     delete_course(user_id, course_id)
     return {"status": "deleted"}
+
+
+@app.get("/courses/{course_id}/assignments")
+def list_course_assignments(course_id: int, user_id: int = Depends(get_current_user)):
+    _require_admin_or_owner(user_id)
+    company_id = get_company_id_for_user(user_id)
+    if not company_id:
+        raise HTTPException(status_code=404, detail="Компания не найдена")
+    assigned_ids = set(get_course_assignments(course_id, company_id))
+    members = get_company_users(company_id)
+    return [
+        {
+            "user_id": m[0],
+            "username": m[1],
+            "role": m[2],
+            "assigned": m[0] in assigned_ids,
+        }
+        for m in members
+    ]
+
+
+class AssignCourseRequest(BaseModel):
+    user_ids: list[int]
+
+
+@app.post("/courses/{course_id}/assignments")
+def assign_course(course_id: int, body: AssignCourseRequest, user_id: int = Depends(get_current_user)):
+    _require_admin_or_owner(user_id)
+    company_id = get_company_id_for_user(user_id)
+    if not company_id:
+        raise HTTPException(status_code=404, detail="Компания не найдена")
+    # Проверяем что курс принадлежит этой компании
+    if get_course_company_id(course_id) != company_id:
+        raise HTTPException(status_code=403, detail="Нет доступа к этому курсу")
+    for uid in body.user_ids:
+        assign_course_to_user(course_id, uid, company_id, assigned_by_user_id=user_id)
+    return {"status": "ok", "assigned": len(body.user_ids)}
+
+
+@app.delete("/courses/{course_id}/assignments/{target_user_id}")
+def unassign_course(course_id: int, target_user_id: int, user_id: int = Depends(get_current_user)):
+    _require_admin_or_owner(user_id)
+    company_id = get_company_id_for_user(user_id)
+    if not company_id:
+        raise HTTPException(status_code=404, detail="Компания не найдена")
+    if get_course_company_id(course_id) != company_id:
+        raise HTTPException(status_code=403, detail="Нет доступа к этому курсу")
+    unassign_course_from_user(course_id, target_user_id, company_id)
+    return {"status": "ok"}
 
 
 @app.get("/courses/{course_id}/progress")

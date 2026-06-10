@@ -13,6 +13,8 @@ interface UsageSummary {
   by_operation: OpRow[];
   by_user: UserCostRow[];
 }
+interface CourseRow { id: number; title: string }
+interface AssignmentMember { user_id: number; username: string; role: string; assigned: boolean }
 
 export default function AdminPage() {
   const router = useRouter();
@@ -30,13 +32,65 @@ export default function AdminPage() {
   const [inviteCopied, setInviteCopied] = useState(false);
   const [inviteRegenerating, setInviteRegenerating] = useState(false);
 
+  // Assignments state
+  const [courses, setCourses] = useState<CourseRow[]>([]);
+  const [selectedCourse, setSelectedCourse] = useState<CourseRow | null>(null);
+  const [assignMembers, setAssignMembers] = useState<AssignmentMember[]>([]);
+  const [assignLoading, setAssignLoading] = useState(false);
+  const [assignSaving, setAssignSaving] = useState(false);
+  const [assignDraft, setAssignDraft] = useState<Record<number, boolean>>({});
+
   useEffect(() => {
     api.get("/admin/users").then((r) => setUsers(r.data)).catch(() => {});
     api.get("/admin/usage").then((r) => setUsage(r.data)).catch(() => {});
     api.get("/company/me").then((r) => {
       if (r.data.invite_code) setInviteCode(r.data.invite_code);
+      if (r.data.company_id) {
+        // Загружаем курсы компании через текущего пользователя
+        api.get(`/users/${user?.user_id}/courses`).then((cr) => setCourses(cr.data)).catch(() => {});
+      }
     }).catch(() => {});
   }, []);
+
+  async function handleSelectCourse(course: CourseRow) {
+    setSelectedCourse(course);
+    setAssignDraft({});
+    setAssignLoading(true);
+    try {
+      const r = await api.get(`/courses/${course.id}/assignments`);
+      const members: AssignmentMember[] = r.data;
+      setAssignMembers(members);
+      const draft: Record<number, boolean> = {};
+      members.forEach((m) => { draft[m.user_id] = m.assigned; });
+      setAssignDraft(draft);
+    } catch {
+      setAssignMembers([]);
+    } finally {
+      setAssignLoading(false);
+    }
+  }
+
+  async function handleSaveAssignments() {
+    if (!selectedCourse) return;
+    setAssignSaving(true);
+    try {
+      const toAssign = assignMembers.filter((m) => assignDraft[m.user_id] && !m.assigned).map((m) => m.user_id);
+      const toUnassign = assignMembers.filter((m) => !assignDraft[m.user_id] && m.assigned).map((m) => m.user_id);
+
+      if (toAssign.length > 0) {
+        await api.post(`/courses/${selectedCourse.id}/assignments`, { user_ids: toAssign });
+      }
+      for (const uid of toUnassign) {
+        await api.delete(`/courses/${selectedCourse.id}/assignments/${uid}`);
+      }
+      // Обновляем актуальное состояние
+      await handleSelectCourse(selectedCourse);
+    } catch {
+      // silent
+    } finally {
+      setAssignSaving(false);
+    }
+  }
 
   async function handleCopyCode() {
     if (!inviteCode) return;
@@ -88,6 +142,8 @@ export default function AdminPage() {
       setGenerating(false);
     }
   }
+
+  const isOwnerOrAdmin = companyRole === "owner" || companyRole === "admin";
 
   return (
     <div>
@@ -223,8 +279,88 @@ export default function AdminPage() {
         </div>
       </div>
 
+      {/* Course assignments — owner/admin only */}
+      {isOwnerOrAdmin && (
+        <div className="mt-8">
+          <h2 className="text-[15px] font-semibold text-[#111827] mb-3">Назначение курсов</h2>
+          <div className="bg-white rounded-2xl border border-[#E5E7EB] p-6">
+            {courses.length === 0 ? (
+              <div className="text-sm text-[#9CA3AF]">Нет созданных курсов</div>
+            ) : (
+              <div className="flex gap-6">
+                {/* Course list */}
+                <div className="w-64 shrink-0">
+                  <div className="text-xs font-semibold text-[#6B7280] uppercase tracking-wide mb-2">Курс</div>
+                  <div className="flex flex-col gap-1">
+                    {courses.map((c) => (
+                      <button
+                        key={c.id}
+                        onClick={() => handleSelectCourse(c)}
+                        className={`text-left px-3 py-2 rounded-lg text-sm transition-colors ${
+                          selectedCourse?.id === c.id
+                            ? "bg-[#EEF2FF] text-[#2563EB] font-semibold"
+                            : "text-[#374151] hover:bg-[#F3F4F6]"
+                        }`}
+                      >
+                        {c.title}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Members checklist */}
+                <div className="flex-1 min-w-0">
+                  {!selectedCourse ? (
+                    <div className="text-sm text-[#9CA3AF] pt-6">Выберите курс слева</div>
+                  ) : assignLoading ? (
+                    <div className="text-sm text-[#9CA3AF]">Загрузка...</div>
+                  ) : (
+                    <>
+                      <div className="text-xs font-semibold text-[#6B7280] uppercase tracking-wide mb-2">
+                        Сотрудники
+                      </div>
+                      <div className="flex flex-col gap-2 mb-4">
+                        {assignMembers.length === 0 ? (
+                          <div className="text-sm text-[#9CA3AF]">Нет сотрудников в компании</div>
+                        ) : (
+                          assignMembers.map((m) => (
+                            <label key={m.user_id} className="flex items-center gap-3 cursor-pointer group">
+                              <input
+                                type="checkbox"
+                                checked={assignDraft[m.user_id] ?? false}
+                                onChange={(e) => setAssignDraft((prev) => ({ ...prev, [m.user_id]: e.target.checked }))}
+                                className="w-4 h-4 rounded border-[#D1D5DB] text-[#2563EB] accent-[#2563EB]"
+                              />
+                              <span className="text-sm text-[#111827]">{m.username}</span>
+                              <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
+                                m.role === "owner" ? "bg-[#FEF3C7] text-[#92400E]" :
+                                m.role === "admin" ? "bg-[#EEF2FF] text-[#2563EB]" :
+                                "bg-[#F3F4F6] text-[#6B7280]"
+                              }`}>
+                                {m.role === "owner" ? "Владелец" : m.role === "admin" ? "Админ" : "Сотрудник"}
+                              </span>
+                            </label>
+                          ))
+                        )}
+                      </div>
+                      <button
+                        onClick={handleSaveAssignments}
+                        disabled={assignSaving}
+                        className="bg-[#2563EB] text-white text-sm font-semibold px-5 py-2 rounded-[10px] hover:bg-[#1D4ED8] transition-colors disabled:opacity-60"
+                      >
+                        {assignSaving ? "Сохраняю..." : "Сохранить назначения"}
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Invite block — owner/admin only */}
-      {(companyRole === "owner" || companyRole === "admin") && (
+      {isOwnerOrAdmin && (
         <div className="mt-8">
           <h2 className="text-[15px] font-semibold text-[#111827] mb-3">Приглашение сотрудников</h2>
           <div className="bg-white rounded-2xl border border-[#E5E7EB] p-6">

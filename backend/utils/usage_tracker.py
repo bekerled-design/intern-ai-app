@@ -9,6 +9,7 @@ def record_openai_usage(
     response,
     related_job_id=None,
     related_course_id=None,
+    company_id=None,
 ):
     """Extract usage from an OpenAI response and save to api_usage. Never raises."""
     try:
@@ -42,6 +43,7 @@ def record_openai_usage(
             estimated_cost_usd=cost,
             related_job_id=related_job_id,
             related_course_id=related_course_id,
+            company_id=company_id,
         )
     except Exception:
         pass  # tracking must never break the main operation
@@ -53,6 +55,7 @@ def record_embedding_usage(
     response,
     related_job_id=None,
     related_course_id=None,
+    company_id=None,
 ):
     """Extract usage from an embeddings response and save to api_usage. Never raises."""
     try:
@@ -73,6 +76,7 @@ def record_embedding_usage(
             estimated_cost_usd=cost,
             related_job_id=related_job_id,
             related_course_id=related_course_id,
+            company_id=company_id,
         )
     except Exception:
         pass
@@ -84,6 +88,7 @@ def record_transcription_usage(
     duration_minutes: float = 0.0,
     related_job_id=None,
     related_course_id=None,
+    company_id=None,
 ):
     """Save transcription usage with real duration and estimated cost. Never raises."""
     try:
@@ -99,6 +104,7 @@ def record_transcription_usage(
             duration_minutes=duration_minutes,
             related_job_id=related_job_id,
             related_course_id=related_course_id,
+            company_id=company_id,
         )
     except Exception:
         pass

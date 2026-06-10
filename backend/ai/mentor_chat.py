@@ -66,6 +66,6 @@ def ask_ai_mentor(client, user_id, company_material, course_data, user_question,
 """,
     )
 
-    record_openai_usage(user_id, "mentor", "gpt-4.1-mini", response)
+    record_openai_usage(user_id, "mentor", "gpt-4.1-mini", response, company_id=company_id)
 
     return response.output_text

@@ -412,7 +412,7 @@ def _trim_tests_evenly(tests: list, max_q: int) -> list:
     return result
 
 
-def generate_course_tests(client, modules, user_id=None, job_id=None):
+def generate_course_tests(client, modules, user_id=None, job_id=None, company_id=None):
 
     module_count = len(modules)
     max_questions = _max_test_questions(module_count)
@@ -485,7 +485,7 @@ def generate_course_tests(client, modules, user_id=None, job_id=None):
 
     if user_id is not None:
         record_openai_usage(user_id, "course_tests", "gpt-4.1-mini", response,
-                            related_job_id=job_id)
+                            related_job_id=job_id, company_id=company_id)
 
     raw_text = response.output_text
     test_data = json.loads(raw_text)
@@ -546,7 +546,7 @@ def generate_module_tests(client, module):
 
     return data["test"]
 
-def generate_practical_task(client, modules, user_id=None, job_id=None):
+def generate_practical_task(client, modules, user_id=None, job_id=None, company_id=None):
 
     # Для практического задания достаточно заголовков и описаний модулей —
     # полный content слать не нужно (задание про применение знаний, а не пересказ).
@@ -595,11 +595,11 @@ def generate_practical_task(client, modules, user_id=None, job_id=None):
 
     if user_id is not None:
         record_openai_usage(user_id, "course_practical", "gpt-4.1-mini", response,
-                            related_job_id=job_id)
+                            related_job_id=job_id, company_id=company_id)
 
     return response.output_text
 
-def generate_part_modules(client, part_text, part_number, user_id=None, job_id=None):
+def generate_part_modules(client, part_text, part_number, user_id=None, job_id=None, company_id=None):
 
     response = client.responses.create(
         model="gpt-4.1-mini",
@@ -656,13 +656,13 @@ def generate_part_modules(client, part_text, part_number, user_id=None, job_id=N
 
     if user_id is not None:
         record_openai_usage(user_id, "course_modules", "gpt-4.1-mini", response,
-                            related_job_id=job_id)
+                            related_job_id=job_id, company_id=company_id)
 
     data = json.loads(response.output_text)
 
     return data["modules"]
 
-def generate_course_by_parts(client, file_content, progress_callback=None, user_id=None, job_id=None):
+def generate_course_by_parts(client, file_content, progress_callback=None, user_id=None, job_id=None, company_id=None):
 
     char_count = len(file_content)
     word_count = len(file_content.split())
@@ -685,6 +685,7 @@ def generate_course_by_parts(client, file_content, progress_callback=None, user_
             index + 1,
             user_id=user_id,
             job_id=job_id,
+            company_id=company_id,
         )
         all_modules.extend(part_modules)
 
@@ -694,11 +695,18 @@ def generate_course_by_parts(client, file_content, progress_callback=None, user_
     if char_count < 30000 and len(all_modules) > 40:
         print(f"[WARNING] too many modules ({len(all_modules)}) for material size ({char_count} chars)")
 
+    # ── Consolidation: если модулей > 30 — объединяем ────────────────────────
+    if len(all_modules) > 30:
+        print(f"[CONSOLIDATE] {len(all_modules)} modules → consolidating to 12–25")
+        all_modules = consolidate_modules(client, all_modules)
+        print(f"[CONSOLIDATE] after: {len(all_modules)} modules")
+
     tests = generate_course_tests(
         client,
         all_modules,
         user_id=user_id,
         job_id=job_id,
+        company_id=company_id,
     )
 
     practical_task = generate_practical_task(
@@ -706,6 +714,7 @@ def generate_course_by_parts(client, file_content, progress_callback=None, user_
         all_modules,
         user_id=user_id,
         job_id=job_id,
+        company_id=company_id,
     )
 
     titles_text = "\n".join(f"- {m['title']}" for m in all_modules[:20])
@@ -724,5 +733,220 @@ def generate_course_by_parts(client, file_content, progress_callback=None, user_
         "test": tests,
         "practical_task": practical_task
     }
+
+    return course_data
+
+
+# ─── Module consolidation (защита от взрыва модулей) ─────────────────────────
+
+def consolidate_modules(client, modules: list) -> list:
+    """Merge micro-modules into 12–25 solid learning blocks."""
+    titles_text = "\n".join(f"{i+1}. {m['title']}" for i, m in enumerate(modules))
+
+    response = client.responses.create(
+        model="gpt-4.1-mini",
+        text={"format": {"type": "json_object"}},
+        input=f"""Ты — AI-методист корпоративного обучения.
+
+Ниже список из {len(modules)} учебных модулей. Это слишком много для одного курса.
+
+Твоя задача: объединить микро-модули в более крупные учебные блоки.
+
+ПРАВИЛА:
+- Итоговое количество модулей: от 12 до 25.
+- Объединяй только тематически близкие модули.
+- Не удаляй важные темы — важные разделы должны быть сохранены.
+- Один модуль = самостоятельный учебный блок (процесс, инструмент, принцип).
+- Не объединяй несвязанные темы ради сокращения.
+- Если тема уникальна — оставь её отдельным модулем.
+- Не придумывай новые темы.
+
+Верни JSON — список групп. Каждая группа станет одним модулем:
+
+{{
+  "groups": [
+    {{
+      "merged_title": "Название объединённого модуля",
+      "source_indices": [1, 2, 3]
+    }}
+  ]
+}}
+
+Список модулей (номера 1-based):
+
+{titles_text}
+"""
+    )
+
+    data = json.loads(response.output_text)
+    groups = data.get("groups", [])
+
+    merged = []
+    for g in groups:
+        indices = [i - 1 for i in g.get("source_indices", []) if 1 <= i <= len(modules)]
+        if not indices:
+            continue
+        primary = modules[indices[0]]
+        combined_content = "\n\n---\n\n".join(
+            f"## {modules[i]['title']}\n\n{modules[i]['content']}" for i in indices
+        )
+        combined_desc = "; ".join(modules[i]["description"] for i in indices)
+        merged.append({
+            "title": g["merged_title"],
+            "description": combined_desc[:300],
+            "content": combined_content,
+        })
+
+    # Fallback: если что-то пошло не так — вернуть первые 25 оригиналов
+    if not merged:
+        return modules[:25]
+
+    return merged
+
+
+# ─── Pre-generation analysis ──────────────────────────────────────────────────
+
+def analyze_training_programs(
+    client,
+    materials: list[dict],
+    user_id: int = None,
+    company_id: int = None,
+) -> dict:
+    """
+    Analyse company materials and recommend how many courses to create.
+
+    materials: list of {"file_name": str, "content": str}
+
+    Returns:
+    {
+      "recommended_mode": "single_course" | "multiple_courses",
+      "warning": str | None,        # non-None when single but many modules expected
+      "programs": [
+        {
+          "course_title": str,
+          "target_role": str,
+          "description": str,
+          "source_files": [str, ...],
+          "source_topics": [str, ...],
+          "reason": str,
+          "estimated_modules": int
+        }
+      ]
+    }
+    """
+    # Build a compact summary for each file (first 3000 chars is enough for analysis)
+    files_summary = ""
+    for m in materials:
+        preview = m["content"][:3000].strip()
+        files_summary += f"\n\n=== Файл: {m['file_name']} ===\n{preview}\n"
+
+    response = client.responses.create(
+        model="gpt-4.1-mini",
+        text={"format": {"type": "json_object"}},
+        input=f"""Ты — AI-методист корпоративного обучения.
+
+Ниже загруженные материалы компании. Твоя задача: проанализировать их и определить,
+нужно ли создать один курс или несколько отдельных курсов.
+
+ПРАВИЛА РАЗДЕЛЕНИЯ:
+1. Если материалы относятся к разным ролям (например, аналитики и поддержка клиентов) — создай отдельный курс для каждой роли.
+2. Если один файл является справочником шаблонов или примеров — НЕ делай из каждого шаблона отдельный курс. Это справочный раздел, он входит в один курс.
+3. Если материалы относятся к одной роли и одному процессу — оставь один курс.
+4. Если один курс ожидаемо будет содержать более 28 модулей — рекомендуй разделение.
+5. Не придумывай курсы, которых нет в материалах.
+6. Минимальный осмысленный курс — не менее 4 полноценных тем.
+
+ОЦЕНКА КОЛИЧЕСТВА МОДУЛЕЙ:
+- Подсчитай, сколько самостоятельных тем можно выделить в каждой группе материалов.
+- Один модуль = одна тема, процесс, инструкция или принцип.
+- Справочник из 20 шаблонов — это 1–2 модуля, не 20.
+
+Верни JSON строго в этом формате:
+
+{{
+  "recommended_mode": "single_course" | "multiple_courses",
+  "warning": null | "Текст предупреждения если один курс слишком большой",
+  "programs": [
+    {{
+      "course_title": "Название курса",
+      "target_role": "Для кого этот курс (роль или аудитория)",
+      "description": "Что будет изучаться в этом курсе (2-3 предложения)",
+      "source_files": ["имя_файла1.txt", "имя_файла2.pdf"],
+      "source_topics": ["тема 1", "тема 2", "тема 3"],
+      "reason": "Почему это отдельный курс или почему объединено в один",
+      "estimated_modules": 12
+    }}
+  ]
+}}
+
+Материалы компании:
+
+{files_summary}
+"""
+    )
+
+    result = json.loads(response.output_text)
+
+    if user_id is not None:
+        record_openai_usage(user_id, "training_program_analysis", "gpt-4.1-mini", response,
+                            company_id=company_id)
+
+    # Нормализация: убедиться что поля есть
+    result.setdefault("recommended_mode", "single_course")
+    result.setdefault("warning", None)
+    result.setdefault("programs", [])
+
+    return result
+
+
+def generate_course_for_program(
+    client,
+    all_materials: list[dict],
+    program: dict,
+    progress_callback=None,
+    user_id=None,
+    job_id=None,
+    course_index: int = 0,
+    total_courses: int = 1,
+    company_id=None,
+) -> dict:
+    """
+    Generate a single course using only the source_files specified in program.
+    Falls back to all materials if source_files don't match.
+    """
+    source_files = set(program.get("source_files", []))
+
+    if source_files:
+        relevant = [m for m in all_materials if m["file_name"] in source_files]
+    else:
+        relevant = all_materials
+
+    if not relevant:
+        relevant = all_materials
+
+    material_text = "".join(
+        f"\n\nФайл: {m['file_name']}\n\n{m['content']}\n\n" for m in relevant
+    )
+
+    def scoped_progress(done, total):
+        if progress_callback:
+            # Translate local part progress to overall progress
+            # Each course gets equal share of overall progress slots
+            base = course_index * 100
+            progress_callback(base + done, total_courses * (total or 1))
+
+    course_data = generate_course_by_parts(
+        client,
+        material_text,
+        scoped_progress,
+        user_id=user_id,
+        job_id=job_id,
+        company_id=company_id,
+    )
+
+    # Override title with AI-suggested title if it looks generic
+    suggested_title = program.get("course_title", "").strip()
+    if suggested_title and len(suggested_title) > 4:
+        course_data["course_title"] = suggested_title
 
     return course_data
