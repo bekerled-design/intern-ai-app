@@ -161,6 +161,8 @@ CREATE TABLE IF NOT EXISTS api_usage (
         "ALTER TABLE api_usage ADD COLUMN company_id INTEGER",
         # invite code layer
         "ALTER TABLE companies ADD COLUMN invite_code TEXT",
+        # прогресс-сообщение job'а (раньше писалось в error — теперь отдельно)
+        "ALTER TABLE course_generation_jobs ADD COLUMN status_message TEXT",
     ]
     for stmt in _safe_alters:
         try:
@@ -324,7 +326,40 @@ CREATE TABLE IF NOT EXISTS course_assignments (
         connection.commit()
         print(f"[seed assignments] processed={len(missing)} seeded={seeded} skipped={skipped}")
 
+    # ── Индексы на часто фильтруемые поля ─────────────────────────────────────
+    _indexes = [
+        "CREATE INDEX IF NOT EXISTS idx_courses_user ON courses(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_courses_company ON courses(company_id)",
+        "CREATE INDEX IF NOT EXISTS idx_assignments_user ON course_assignments(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_chunks_company ON material_chunks(company_id)",
+        "CREATE INDEX IF NOT EXISTS idx_api_usage_company ON api_usage(company_id)",
+        "CREATE INDEX IF NOT EXISTS idx_test_results_user ON test_results(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_jobs_user_status ON course_generation_jobs(user_id, status)",
+    ]
+    for stmt in _indexes:
+        cursor.execute(stmt)
+    connection.commit()
+
     connection.close()
+
+
+def fail_stale_jobs():
+    """Помечает зависшие pending/running jobs как error (вызывается при старте сервера)."""
+    connection = connect_db()
+    cursor = connection.cursor()
+    cursor.execute("""
+    UPDATE course_generation_jobs
+    SET status = 'error',
+        error = 'Сервер был перезапущен во время генерации. Запустите генерацию заново.',
+        status_message = NULL
+    WHERE status IN ('pending', 'running')
+    """)
+    failed = cursor.rowcount
+    connection.commit()
+    connection.close()
+    if failed:
+        print(f"[startup] помечено зависших jobs: {failed}")
+    return failed
 
 def save_test_result(user_id, score):
 
@@ -935,7 +970,7 @@ def create_job(user_id, company_id=None):
     return job_id
 
 
-def update_job_status(job_id, status, course_id=None, error=None, progress_done=None, progress_total=None):
+def update_job_status(job_id, status, course_id=None, error=None, progress_done=None, progress_total=None, status_message=None):
     connection = connect_db()
     cursor = connection.cursor()
     fields = ["status = ?"]
@@ -946,6 +981,13 @@ def update_job_status(job_id, status, course_id=None, error=None, progress_done=
     if error is not None:
         fields.append("error = ?")
         values.append(error)
+    if status_message is not None:
+        fields.append("status_message = ?")
+        values.append(status_message)
+    if status == "done":
+        # очищаем прогресс-сообщение и ошибку завершённого job'а
+        fields.append("status_message = NULL")
+        fields.append("error = NULL")
     if progress_done is not None:
         fields.append("progress_done = ?")
         values.append(progress_done)
@@ -962,7 +1004,7 @@ def get_job(job_id):
     connection = connect_db()
     cursor = connection.cursor()
     cursor.execute("""
-    SELECT id, user_id, status, course_id, progress_done, progress_total, error
+    SELECT id, user_id, status, course_id, progress_done, progress_total, error, status_message
     FROM course_generation_jobs WHERE id = ?
     """, (job_id,))
     row = cursor.fetchone()
@@ -974,7 +1016,7 @@ def get_active_job(user_id):
     connection = connect_db()
     cursor = connection.cursor()
     cursor.execute("""
-    SELECT id, user_id, status, course_id, progress_done, progress_total, error
+    SELECT id, user_id, status, course_id, progress_done, progress_total, error, status_message
     FROM course_generation_jobs
     WHERE user_id = ? AND status IN ('pending', 'running')
     ORDER BY id DESC LIMIT 1
@@ -988,7 +1030,7 @@ def get_last_done_job(user_id):
     connection = connect_db()
     cursor = connection.cursor()
     cursor.execute("""
-    SELECT id, user_id, status, course_id, progress_done, progress_total, error
+    SELECT id, user_id, status, course_id, progress_done, progress_total, error, status_message
     FROM course_generation_jobs
     WHERE user_id = ? AND status = 'done' AND course_id IS NOT NULL
     ORDER BY id DESC LIMIT 1

@@ -1,6 +1,8 @@
 import asyncio
 import json
 import os
+import time
+from collections import defaultdict, deque
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -47,6 +49,7 @@ from database.database import (
     get_job,
     get_active_job,
     get_last_done_job,
+    fail_stale_jobs,
     get_user_api_usage,
     get_total_api_usage,
     get_api_usage_summary_by_operation,
@@ -93,6 +96,7 @@ from utils.text_search import split_text_into_chunks
 from utils.file_loader import read_uploaded_file
 from utils.usage_tracker import record_transcription_usage
 from utils.media_duration import get_media_duration_minutes
+from config import WHISPER_MODEL, MAX_UPLOAD_SIZE_MB, MAX_UPLOAD_SIZE_BYTES
 
 # Load .env from backend dir first, then from project root as fallback
 load_dotenv()
@@ -119,6 +123,9 @@ client = OpenAI(
 )
 
 create_tables()
+# Jobs, оборванные рестартом сервера, помечаем как error —
+# иначе фронт будет крутить спиннер по ним вечно.
+fail_stale_jobs()
 
 
 # ─── Auth (простой токен = user_id строкой, для MVP) ─────────────────────────
@@ -176,6 +183,26 @@ def health():
 
 # ─── Auth endpoints ───────────────────────────────────────────────────────────
 
+# Простой in-memory rate limit на вход: 10 попыток / 5 минут на username.
+# При нескольких процессах не разделяется — для MVP достаточно.
+_login_attempts: dict[str, deque] = defaultdict(deque)
+_LOGIN_LIMIT = 10
+_LOGIN_WINDOW_SECONDS = 300
+
+
+def _check_login_rate(username: str):
+    now = time.time()
+    attempts = _login_attempts[username.lower()]
+    while attempts and now - attempts[0] > _LOGIN_WINDOW_SECONDS:
+        attempts.popleft()
+    if len(attempts) >= _LOGIN_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail="Слишком много попыток входа. Попробуйте через несколько минут.",
+        )
+    attempts.append(now)
+
+
 def _auth_response(user_id: int, username: str):
     """Build unified auth response with company_id and role."""
     row = get_user_company(user_id)
@@ -197,6 +224,7 @@ def _auth_response(user_id: int, username: str):
 def register(body: RegisterRequest):
     # Existing user: just log them in (backward compat)
     if username_exists(body.username):
+        _check_login_rate(body.username)
         user = get_user(body.username, body.password)
         if not user:
             raise HTTPException(status_code=401, detail="Неверный пароль")
@@ -226,6 +254,7 @@ def register(body: RegisterRequest):
 
 @app.post("/auth/login")
 def login(body: LoginRequest):
+    _check_login_rate(body.username)
     if not username_exists(body.username):
         raise HTTPException(status_code=404, detail="Пользователь не найден")
     user = get_user(body.username, body.password)
@@ -251,6 +280,11 @@ async def upload_material(
     import os as _os
 
     raw = await file.read()
+    if len(raw) > MAX_UPLOAD_SIZE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Файл слишком большой. Максимальный размер — {MAX_UPLOAD_SIZE_MB} МБ.",
+        )
     name_lower = file.filename.lower()
     company_id = get_company_id_for_user(user_id)
 
@@ -262,16 +296,17 @@ async def upload_material(
         try:
             with open(tmp_path, "rb") as audio_file:
                 transcript = client.audio.transcriptions.create(
-                    model="whisper-1",
+                    model=WHISPER_MODEL,
                     file=audio_file,
                     response_format="text",
                 )
             content = str(transcript)
             duration_minutes = get_media_duration_minutes(tmp_path)
-            record_transcription_usage(user_id, "whisper-1", duration_minutes=duration_minutes,
+            record_transcription_usage(user_id, WHISPER_MODEL, duration_minutes=duration_minutes,
                                        company_id=company_id)
         except Exception as e:
-            content = f"Ошибка транскрипции: {e}"
+            # Не сохраняем текст ошибки как контент материала — иначе он попадёт в RAG
+            raise HTTPException(status_code=500, detail=f"Ошибка транскрипции: {e}")
         finally:
             if _os.path.exists(tmp_path):
                 _os.remove(tmp_path)
@@ -358,7 +393,7 @@ def get_generation_job(job_id: int, user_id: int = Depends(get_current_user)):
     row = get_job(job_id)
     if not row:
         raise HTTPException(status_code=404, detail="Job не найден")
-    _, _, status, course_id, progress_done, progress_total, error = row
+    _, _, status, course_id, progress_done, progress_total, error, status_message = row
     return {
         "job_id": job_id,
         "status": status,
@@ -366,6 +401,7 @@ def get_generation_job(job_id: int, user_id: int = Depends(get_current_user)):
         "progress_done": progress_done,
         "progress_total": progress_total,
         "error": error,
+        "status_message": status_message,
     }
 
 
@@ -378,7 +414,7 @@ def get_active_generation_job(user_id: int = Depends(get_current_user)):
         row = get_last_done_job(user_id)
     if not row:
         return {"job": None}
-    _, _, status, course_id, progress_done, progress_total, error = row
+    _, _, status, course_id, progress_done, progress_total, error, status_message = row
     return {"job": {
         "job_id": row[0],
         "status": status,
@@ -386,6 +422,7 @@ def get_active_generation_job(user_id: int = Depends(get_current_user)):
         "progress_done": progress_done,
         "progress_total": progress_total,
         "error": error,
+        "status_message": status_message,
     }}
 
 
@@ -443,10 +480,9 @@ def _run_multi_generation_job(
                                   progress_done=overall_done,
                                   progress_total=overall_total)
 
-            # Status label via error field (non-fatal; overwritten on success)
             update_job_status(
                 job_id, "running",
-                error=f"Генерируется курс {idx + 1} из {total_programs}: {program.get('course_title', '')}",
+                status_message=f"Генерируется курс {idx + 1} из {total_programs}: {program.get('course_title', '')}",
                 progress_done=idx * 100,
                 progress_total=total_programs * 100,
             )
@@ -468,12 +504,12 @@ def _run_multi_generation_job(
             add_activity(user_id, f"Сгенерировал курс: {course_data.get('course_title', '')}")
             created_course_ids.append(course_id)
 
-        # Store last course_id so frontend can open it; full list in error field
+        # Store last course_id so frontend can open it
+        # (status "done" сам очищает error и status_message в update_job_status)
         last_id = created_course_ids[-1] if created_course_ids else None
         update_job_status(
             job_id, "done",
             course_id=last_id,
-            error=None,
             progress_done=0,
             progress_total=0,
         )
@@ -543,6 +579,11 @@ def list_user_courses(target_user_id: int, user_id: int = Depends(get_current_us
     requester_role = requester_row[2] if requester_row else "employee"
     requester_company = requester_row[0] if requester_row else None
 
+    # employee может смотреть только свои курсы; owner/admin — только в своей компании
+    if requester_role not in ("owner", "admin") and target_user_id != user_id:
+        raise HTTPException(status_code=403, detail="Нет доступа к курсам другого пользователя")
+    _require_company_access(user_id, target_user_id)
+
     if requester_role in ("owner", "admin"):
         # owner/admin видит все курсы компании
         from database.database import connect_db as _cdb
@@ -590,21 +631,28 @@ def list_user_courses(target_user_id: int, user_id: int = Depends(get_current_us
     return result
 
 
-@app.get("/courses/{course_id}")
-def get_course(course_id: int, user_id: int = Depends(get_current_user)):
+def _check_course_access(user_id: int, course_id: int):
+    """404 если курса нет; 403 если курс чужой компании или не назначен employee."""
     row = get_course_by_id(course_id)
     if not row:
         raise HTTPException(status_code=404, detail="Курс не найден")
     course_company = get_course_company_id(course_id)
-    if course_company is not None:
-        requester_company = get_company_id_for_user(user_id)
-        if requester_company != course_company:
-            raise HTTPException(status_code=403, detail="Нет доступа к этому курсу")
-        # Employee must be assigned or be the creator
-        requester_row = get_user_company(user_id)
-        requester_role = requester_row[2] if requester_row else "employee"
-        if requester_role == "employee" and not user_has_course_access(user_id, course_id):
-            raise HTTPException(status_code=403, detail="Курс не назначен")
+    if course_company is None:
+        return row  # legacy-курс без компании
+    requester_row = get_user_company(user_id)
+    requester_company = requester_row[0] if requester_row else None
+    requester_role = requester_row[2] if requester_row else "employee"
+    if requester_company != course_company:
+        raise HTTPException(status_code=403, detail="Нет доступа к этому курсу")
+    # Employee must be assigned or be the creator
+    if requester_role == "employee" and not user_has_course_access(user_id, course_id):
+        raise HTTPException(status_code=403, detail="Курс не назначен")
+    return row
+
+
+@app.get("/courses/{course_id}")
+def get_course(course_id: int, user_id: int = Depends(get_current_user)):
+    row = _check_course_access(user_id, course_id)
     return json.loads(row[0])
 
 
@@ -665,6 +713,7 @@ def unassign_course(course_id: int, target_user_id: int, user_id: int = Depends(
 
 @app.get("/courses/{course_id}/progress")
 def course_progress(course_id: int, user_id: int = Depends(get_current_user)):
+    _check_course_access(user_id, course_id)
     completed = get_completed_modules(user_id, course_id)
     return {"completed_modules": completed}
 
@@ -675,6 +724,7 @@ def save_progress(
     body: ModuleProgressRequest,
     user_id: int = Depends(get_current_user),
 ):
+    _check_course_access(user_id, course_id)
     save_module_progress(user_id, course_id, body.module_index)
     add_activity(user_id, f"Завершил модуль {body.module_index} курса {course_id}")
     return {"status": "ok"}
@@ -845,6 +895,10 @@ def admin_usage(user_id: int = Depends(get_current_user)):
 
 @app.get("/users/{target_user_id}/usage")
 def user_usage(target_user_id: int, user_id: int = Depends(get_current_user)):
+    # Свой usage может смотреть каждый, чужой — только owner/admin своей компании
+    if target_user_id != user_id:
+        _require_admin_or_owner(user_id)
+        _require_company_access(user_id, target_user_id)
     rows = get_user_api_usage(target_user_id)
     records = [
         {

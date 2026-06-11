@@ -17,6 +17,7 @@ export default function CoursesPage() {
   const user = getUser();
   const [courses, setCourses] = useState<Course[]>([]);
   const [viewUsername, setViewUsername] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState("");
 
   useEffect(() => {
     if (!user) return;
@@ -24,7 +25,9 @@ export default function CoursesPage() {
     const viewName = localStorage.getItem("view_username");
     const targetId = viewId ? Number(viewId) : user.user_id;
     if (viewId && viewName) setViewUsername(viewName);
-    api.get(`/users/${targetId}/courses`).then((r) => setCourses(r.data)).catch(() => {});
+    api.get(`/users/${targetId}/courses`)
+      .then((r) => setCourses(r.data))
+      .catch(() => setLoadError("Не удалось загрузить курсы. Обновите страницу."));
   }, []);
 
   function openCourse(id: number) {
@@ -60,6 +63,12 @@ export default function CoursesPage() {
         </div>
       )}
       <h1 className="text-[22px] font-bold text-[#111827] mb-6">{viewUsername ? `Курсы: ${viewUsername}` : "Мои курсы"}</h1>
+
+      {loadError && (
+        <div className="mb-4 bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-sm text-red-600">
+          {loadError}
+        </div>
+      )}
 
       {courses.length === 0 ? (
         <div className="bg-white rounded-2xl border border-[#E5E7EB] p-12 text-center text-[#6B7280] text-sm">

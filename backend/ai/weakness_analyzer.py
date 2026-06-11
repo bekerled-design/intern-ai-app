@@ -1,3 +1,6 @@
+from config import OPENAI_MODEL
+
+
 def analyze_weaknesses(client, weak_topics):
     if not weak_topics:
         return None
@@ -5,7 +8,7 @@ def analyze_weaknesses(client, weak_topics):
     topics_text = "\n".join(f"- {t}" for t in weak_topics)
 
     response = client.responses.create(
-        model="gpt-4.1-mini",
+        model=OPENAI_MODEL,
         input=f"""Ты — AI-наставник корпоративного обучения.
 
 Стажёр допустил ошибки в тесте по следующим темам:

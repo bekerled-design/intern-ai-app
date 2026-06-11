@@ -4,6 +4,7 @@ from ai.embeddings import create_embedding
 from utils.semantic_search import search_similar_chunks
 from database.database import get_company_material_chunks, get_ai_chat_history
 from utils.usage_tracker import record_openai_usage
+from config import OPENAI_MODEL
 
 # Hard cutoff: only skip LLM if there are literally no chunks at all or all scores
 # are near zero. Rely on the prompt to handle "no information" cases.
@@ -46,7 +47,7 @@ def ask_ai_mentor(client, user_id, company_material, course_data, user_question,
         history_text += f"Вопрос: {question}\nОтвет: {answer}\n\n"
 
     response = client.responses.create(
-        model="gpt-4.1-mini",
+        model=OPENAI_MODEL,
         input=f"""Ты — AI-наставник компании.
 
 Отвечай ТОЛЬКО на основе предоставленных фрагментов материалов.
@@ -66,6 +67,6 @@ def ask_ai_mentor(client, user_id, company_material, course_data, user_question,
 """,
     )
 
-    record_openai_usage(user_id, "mentor", "gpt-4.1-mini", response, company_id=company_id)
+    record_openai_usage(user_id, "mentor", OPENAI_MODEL, response, company_id=company_id)
 
     return response.output_text

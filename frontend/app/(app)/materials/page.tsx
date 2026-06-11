@@ -11,6 +11,7 @@ interface Job {
   progress_done: number;
   progress_total: number;
   error: string | null;
+  status_message?: string | null;
 }
 
 interface Program {
@@ -40,8 +41,11 @@ function jobStatusLabel(job: Job): string {
   if (job.status === "pending") return "Подготовка...";
   if (job.status === "error") return `Ошибка: ${job.error ?? "неизвестная"}`;
   if (job.status === "done") return "Курс создан!";
-  // During multi-course generation, error field carries the status message
-  if (job.error && job.status === "running") return job.error;
+  // Multi-course generation reports "курс N из M" via status_message
+  // (fallback на error — для бэкенда старой версии)
+  if (job.status === "running" && (job.status_message || job.error)) {
+    return job.status_message ?? job.error ?? "";
+  }
   if (job.progress_total > 0) {
     const current = Math.min(job.progress_done + 1, job.progress_total);
     return `Обрабатываю часть ${current} из ${job.progress_total}...`;

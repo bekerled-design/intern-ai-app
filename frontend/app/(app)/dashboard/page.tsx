@@ -4,20 +4,7 @@ import { useRouter } from "next/navigation";
 import api from "@/lib/api";
 import { getUser } from "@/lib/auth";
 import { Course } from "@/lib/types";
-
-function formatDateTime(str: string) {
-  const d = new Date(str);
-  if (isNaN(d.getTime())) return str;
-  const now = new Date();
-  const isToday = d.toDateString() === now.toDateString();
-  const yesterday = new Date(now);
-  yesterday.setDate(now.getDate() - 1);
-  const isYesterday = d.toDateString() === yesterday.toDateString();
-  const time = d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
-  if (isToday) return `Сегодня в ${time}`;
-  if (isYesterday) return `Вчера в ${time}`;
-  return d.toLocaleDateString("ru-RU", { day: "numeric", month: "long" }) + ` в ${time}`;
-}
+import { formatDateTime } from "@/lib/utils";
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -25,12 +12,14 @@ export default function DashboardPage() {
   const [courses, setCourses] = useState<Course[]>([]);
   const [scores, setScores] = useState<number[]>([]);
   const [activity, setActivity] = useState<{ action: string; created_at: string }[]>([]);
+  const [loadError, setLoadError] = useState("");
 
   useEffect(() => {
     if (!user) return;
-    api.get(`/users/${user.user_id}/courses`).then((r) => setCourses(r.data)).catch(() => {});
-    api.get("/tests/results").then((r) => setScores(r.data.scores ?? [])).catch(() => {});
-    api.get("/activity").then((r) => setActivity(r.data ?? [])).catch(() => {});
+    const failLoad = () => setLoadError("Не удалось загрузить данные. Обновите страницу.");
+    api.get(`/users/${user.user_id}/courses`).then((r) => setCourses(r.data)).catch(failLoad);
+    api.get("/tests/results").then((r) => setScores(r.data.scores ?? [])).catch(failLoad);
+    api.get("/activity").then((r) => setActivity(r.data ?? [])).catch(failLoad);
   }, []);
 
   const avgScore = scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : null;
@@ -38,6 +27,12 @@ export default function DashboardPage() {
 
   return (
     <div>
+      {loadError && (
+        <div className="mb-4 bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-sm text-red-600">
+          {loadError}
+        </div>
+      )}
+
       {/* Hero */}
       <div className="rounded-2xl bg-gradient-to-br from-[#1E3A8A] to-[#2563EB] text-white p-8 mb-6 flex items-center justify-between">
         <div>

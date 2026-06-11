@@ -27,6 +27,7 @@ export default function AdminPage() {
   const [generating, setGenerating] = useState(false);
   const [genDone, setGenDone] = useState(false);
   const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState("");
   const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [inviteCode, setInviteCode] = useState<string | null>(null);
   const [inviteCopied, setInviteCopied] = useState(false);
@@ -41,15 +42,16 @@ export default function AdminPage() {
   const [assignDraft, setAssignDraft] = useState<Record<number, boolean>>({});
 
   useEffect(() => {
-    api.get("/admin/users").then((r) => setUsers(r.data)).catch(() => {});
-    api.get("/admin/usage").then((r) => setUsage(r.data)).catch(() => {});
+    const failLoad = () => setLoadError("Не удалось загрузить данные админ-панели. Обновите страницу.");
+    api.get("/admin/users").then((r) => setUsers(r.data)).catch(failLoad);
+    api.get("/admin/usage").then((r) => setUsage(r.data)).catch(failLoad);
     api.get("/company/me").then((r) => {
       if (r.data.invite_code) setInviteCode(r.data.invite_code);
       if (r.data.company_id) {
         // Загружаем курсы компании через текущего пользователя
-        api.get(`/users/${user?.user_id}/courses`).then((cr) => setCourses(cr.data)).catch(() => {});
+        api.get(`/users/${user?.user_id}/courses`).then((cr) => setCourses(cr.data)).catch(failLoad);
       }
-    }).catch(() => {});
+    }).catch(failLoad);
   }, []);
 
   async function handleSelectCourse(course: CourseRow) {
@@ -86,7 +88,7 @@ export default function AdminPage() {
       // Обновляем актуальное состояние
       await handleSelectCourse(selectedCourse);
     } catch {
-      // silent
+      setLoadError("Не удалось сохранить назначения курса");
     } finally {
       setAssignSaving(false);
     }
@@ -105,7 +107,7 @@ export default function AdminPage() {
       const r = await api.post("/company/invite-code/regenerate", {});
       setInviteCode(r.data.invite_code);
     } catch {
-      // silent
+      setLoadError("Не удалось обновить код приглашения");
     } finally {
       setInviteRegenerating(false);
     }
@@ -148,6 +150,12 @@ export default function AdminPage() {
   return (
     <div>
       <h1 className="text-[22px] font-bold text-[#111827] mb-6">Администратор</h1>
+
+      {loadError && (
+        <div className="mb-4 bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-sm text-red-600">
+          {loadError}
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-6">
         {/* Users list */}

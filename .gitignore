@@ -1,7 +1,36 @@
-.env
-.venv
-__pycache__
+# Python
+__pycache__/
 *.pyc
+*.pyo
+*.pyd
+.venv/
+.venv-1/
+venv/
+env/
+
+# Секреты и окружение
+.env
+.env.*
+
+# Базы данных
 intern_ai.db
-data
-CLAUDE.md
+*.db
+*.sqlite
+*.sqlite3
+
+# Локальные данные
+data/
+
+# Claude Code
+.claude/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+.vercel/
+
+# ОС и редакторы
+.DS_Store
+Thumbs.db
+.vscode/

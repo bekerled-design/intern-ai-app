@@ -1,7 +1,24 @@
 import json
 import re
+from config import OPENAI_MODEL
 from utils.text_search import split_text_into_chunks, search_relevant_chunks
 from utils.usage_tracker import record_openai_usage
+
+
+class CourseGenerationError(Exception):
+    """Понятная пользователю ошибка генерации — попадает в статус job как есть."""
+
+
+def _parse_json_response(response, step: str) -> dict:
+    """Парсит JSON из ответа OpenAI; при мусоре кидает CourseGenerationError."""
+    raw = getattr(response, "output_text", None) or ""
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as e:
+        print(f"[JSON ERROR] step={step}: {e}; raw[:300]={raw[:300]!r}")
+        raise CourseGenerationError(
+            f"AI вернул некорректный ответ на шаге «{step}». Запустите генерацию ещё раз."
+        )
 
 
 def split_material_into_parts(text, chunk_size=10000, overlap=1000):
@@ -98,7 +115,7 @@ def generate_course_lite(client, file_content):
         file_content = file_content[:250000]
 
     response = client.responses.create(
-        model="gpt-4.1-mini",
+        model=OPENAI_MODEL,
         text={
             "format": {
                 "type": "json_object"
@@ -151,7 +168,7 @@ def generate_course_lite(client, file_content):
 """
     )
 
-    return json.loads(response.output_text)
+    return _parse_json_response(response, "генерация курса (лайт)")
 
 def generate_course_plan(client, file_content):
 
@@ -173,7 +190,7 @@ def generate_course_plan(client, file_content):
         all_topics.extend(chunk_topics)
 
     response = client.responses.create(
-        model="gpt-4.1-mini",
+        model=OPENAI_MODEL,
         text={
             "format": {
                 "type": "json_object"
@@ -238,8 +255,7 @@ def generate_course_plan(client, file_content):
 """
     )
 
-    raw_text = response.output_text
-    course_plan = json.loads(raw_text)
+    course_plan = _parse_json_response(response, "план курса")
 
     return course_plan
 
@@ -275,7 +291,7 @@ def get_module_context(file_content, module_plan):
 def generate_chunk_plan(client, chunk):
 
     response = client.responses.create(
-        model="gpt-4.1-mini",
+        model=OPENAI_MODEL,
         text={
             "format": {
                 "type": "json_object"
@@ -311,10 +327,9 @@ def generate_chunk_plan(client, chunk):
 """
     )
 
-    raw_text = response.output_text
-    data = json.loads(raw_text)
+    data = _parse_json_response(response, "анализ фрагмента")
 
-    return data["topics"]
+    return data.get("topics", [])
 
 def generate_course_module(client, file_content, module_plan):
     
@@ -324,7 +339,7 @@ def generate_course_module(client, file_content, module_plan):
     )
     
     response = client.responses.create(
-        model="gpt-4.1-mini",
+        model=OPENAI_MODEL,
         input=f"""
 Ты — профессиональный AI-тренер корпоративного обучения.
 
@@ -435,7 +450,7 @@ def generate_course_tests(client, modules, user_id=None, job_id=None, company_id
 """
 
     response = client.responses.create(
-        model="gpt-4.1-mini",
+        model=OPENAI_MODEL,
         text={
             "format": {
                 "type": "json_object"
@@ -484,12 +499,15 @@ def generate_course_tests(client, modules, user_id=None, job_id=None, company_id
     )
 
     if user_id is not None:
-        record_openai_usage(user_id, "course_tests", "gpt-4.1-mini", response,
+        record_openai_usage(user_id, "course_tests", OPENAI_MODEL, response,
                             related_job_id=job_id, company_id=company_id)
 
-    raw_text = response.output_text
-    test_data = json.loads(raw_text)
-    tests = test_data["test"]
+    test_data = _parse_json_response(response, "генерация теста")
+    tests = test_data.get("test")
+    if not tests:
+        raise CourseGenerationError(
+            "AI не вернул вопросы теста. Запустите генерацию ещё раз."
+        )
 
     # Post-processing: enforce hard cap with even topic distribution
     tests = _trim_tests_evenly(tests, max_questions)
@@ -499,7 +517,7 @@ def generate_course_tests(client, modules, user_id=None, job_id=None, company_id
 def generate_module_tests(client, module):
 
     response = client.responses.create(
-        model="gpt-4.1-mini",
+        model=OPENAI_MODEL,
         text={
             "format": {
                 "type": "json_object"
@@ -541,10 +559,9 @@ def generate_module_tests(client, module):
 """
     )
 
-    raw_text = response.output_text
-    data = json.loads(raw_text)
+    data = _parse_json_response(response, "тест модуля")
 
-    return data["test"]
+    return data.get("test", [])
 
 def generate_practical_task(client, modules, user_id=None, job_id=None, company_id=None):
 
@@ -565,7 +582,7 @@ def generate_practical_task(client, modules, user_id=None, job_id=None, company_
 """
 
     response = client.responses.create(
-        model="gpt-4.1-mini",
+        model=OPENAI_MODEL,
         input=f"""
 Ты — AI-методист корпоративного обучения.
 
@@ -594,7 +611,7 @@ def generate_practical_task(client, modules, user_id=None, job_id=None, company_
     )
 
     if user_id is not None:
-        record_openai_usage(user_id, "course_practical", "gpt-4.1-mini", response,
+        record_openai_usage(user_id, "course_practical", OPENAI_MODEL, response,
                             related_job_id=job_id, company_id=company_id)
 
     return response.output_text
@@ -602,7 +619,7 @@ def generate_practical_task(client, modules, user_id=None, job_id=None, company_
 def generate_part_modules(client, part_text, part_number, user_id=None, job_id=None, company_id=None):
 
     response = client.responses.create(
-        model="gpt-4.1-mini",
+        model=OPENAI_MODEL,
         text={
             "format": {
                 "type": "json_object"
@@ -655,12 +672,17 @@ def generate_part_modules(client, part_text, part_number, user_id=None, job_id=N
     )
 
     if user_id is not None:
-        record_openai_usage(user_id, "course_modules", "gpt-4.1-mini", response,
+        record_openai_usage(user_id, "course_modules", OPENAI_MODEL, response,
                             related_job_id=job_id, company_id=company_id)
 
-    data = json.loads(response.output_text)
+    data = _parse_json_response(response, "генерация модулей")
+    modules = data.get("modules")
+    if not modules:
+        raise CourseGenerationError(
+            "AI не вернул модули для части материала. Запустите генерацию ещё раз."
+        )
 
-    return data["modules"]
+    return modules
 
 def generate_course_by_parts(client, file_content, progress_callback=None, user_id=None, job_id=None, company_id=None):
 
@@ -720,7 +742,7 @@ def generate_course_by_parts(client, file_content, progress_callback=None, user_
     titles_text = "\n".join(f"- {m['title']}" for m in all_modules[:20])
     try:
         title_resp = client.responses.create(
-            model="gpt-4.1-mini",
+            model=OPENAI_MODEL,
             input=f"Придумай короткое (3-7 слов) название курса по этим модулям. Верни только название, без кавычек.\n\n{titles_text}"
         )
         course_title = title_resp.output_text.strip()
@@ -744,7 +766,7 @@ def consolidate_modules(client, modules: list) -> list:
     titles_text = "\n".join(f"{i+1}. {m['title']}" for i, m in enumerate(modules))
 
     response = client.responses.create(
-        model="gpt-4.1-mini",
+        model=OPENAI_MODEL,
         text={"format": {"type": "json_object"}},
         input=f"""Ты — AI-методист корпоративного обучения.
 
@@ -778,7 +800,11 @@ def consolidate_modules(client, modules: list) -> list:
 """
     )
 
-    data = json.loads(response.output_text)
+    # Консолидация — best-effort: при кривом JSON не валим job, а используем fallback ниже
+    try:
+        data = _parse_json_response(response, "консолидация модулей")
+    except CourseGenerationError:
+        data = {}
     groups = data.get("groups", [])
 
     merged = []
@@ -841,7 +867,7 @@ def analyze_training_programs(
         files_summary += f"\n\n=== Файл: {m['file_name']} ===\n{preview}\n"
 
     response = client.responses.create(
-        model="gpt-4.1-mini",
+        model=OPENAI_MODEL,
         text={"format": {"type": "json_object"}},
         input=f"""Ты — AI-методист корпоративного обучения.
 
@@ -885,10 +911,10 @@ def analyze_training_programs(
 """
     )
 
-    result = json.loads(response.output_text)
+    result = _parse_json_response(response, "анализ материалов")
 
     if user_id is not None:
-        record_openai_usage(user_id, "training_program_analysis", "gpt-4.1-mini", response,
+        record_openai_usage(user_id, "training_program_analysis", OPENAI_MODEL, response,
                             company_id=company_id)
 
     # Нормализация: убедиться что поля есть

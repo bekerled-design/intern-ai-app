@@ -1,4 +1,5 @@
-import json
+from config import OPENAI_MODEL
+from ai.course_generator import _parse_json_response
 
 
 def generate_retraining_course(client, weak_topics, company_material):
@@ -6,7 +7,7 @@ def generate_retraining_course(client, weak_topics, company_material):
     weak_topics_text = "\n".join(weak_topics)
 
     response = client.responses.create(
-        model="gpt-4.1-mini",
+        model=OPENAI_MODEL,
         text={
             "format": {
                 "type": "json_object"
@@ -53,4 +54,4 @@ def generate_retraining_course(client, weak_topics, company_material):
 """
     )
 
-    return json.loads(response.output_text)
+    return _parse_json_response(response, "курс доучивания")
